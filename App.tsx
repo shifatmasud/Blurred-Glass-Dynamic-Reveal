@@ -1,30 +1,12 @@
+
 import React, { useState } from 'react';
 import GlassEffect from './components/GlassEffect';
-import { useMousePosition } from './hooks/useMousePosition';
 
 const App: React.FC = () => {
-  const { x, y, velocity } = useMousePosition();
   const [refrostRate, setRefrostRate] = useState(0.0004);
 
-  const scale = 1 + Math.min(velocity, 50) / 100;
-
   return (
-    <main className="relative flex flex-col items-center justify-center min-h-screen w-full text-white p-4 antialiased overflow-hidden cursor-none">
-      
-      {/* Custom Cursor */}
-      <div 
-        className="pointer-events-none fixed z-50 rounded-full transition-transform duration-100 ease-out"
-        style={{ 
-          left: x, 
-          top: y,
-          width: '50px',
-          height: '50px',
-          transform: `translate(-50%, -50%) scale(${scale})`,
-          background: 'radial-gradient(circle, rgba(255,255,255,0.1) 0%, rgba(255,255,255,0) 60%)',
-          border: '1px solid rgba(255, 255, 255, 0.3)',
-          boxShadow: '0 0 20px 5px rgba(255, 255, 255, 0.1)',
-        }}
-      />
+    <main className="relative flex flex-col items-center justify-center min-h-screen w-full text-white p-4 antialiased overflow-hidden">
       
       <div className="z-10 text-center mb-8 px-4 animate-fade-in-up">
         <h1 className="text-4xl md:text-6xl font-light tracking-wider text-gray-200 mb-2" style={{textShadow: '0 2px 20px rgba(0,0,0,0.5)'}}>

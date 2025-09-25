@@ -1,3 +1,4 @@
+
 import React, { useRef, useEffect } from 'react';
 import * as THREE from 'three';
 
@@ -53,10 +54,15 @@ const copyFragmentShader = `
       if (uImageResolution.y > 0.0) {
           float canvasAspect = uResolution.x / uResolution.y;
           float imageAspect = uImageResolution.x / uImageResolution.y;
-          if (imageAspect > canvasAspect) {
-              st.y = st.y * (canvasAspect / imageAspect) + (1.0 - canvasAspect / imageAspect) / 2.0;
+
+          if (canvasAspect > imageAspect) {
+              // Canvas is wider than the image, so we fit the image's width and crop the top/bottom.
+              float scale = imageAspect / canvasAspect;
+              st.y = st.y * scale + (1.0 - scale) / 2.0;
           } else {
-              st.x = st.x * (imageAspect / canvasAspect) + (1.0 - imageAspect / canvasAspect) / 2.0;
+              // Canvas is taller than the image, so we fit the image's height and crop the sides.
+              float scale = canvasAspect / imageAspect;
+              st.x = st.x * scale + (1.0 - scale) / 2.0;
           }
       }
       return st;
