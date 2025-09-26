@@ -247,6 +247,7 @@ class ClarityController {
     private isCancelled = false;
     private animationFrameId: number | null = null;
     private static DOWNSAMPLE_FACTOR = 2;
+    private isReady = false;
 
     constructor(canvas: HTMLCanvasElement, initialProps: Partial<ClarityProps>) {
         this.canvas = canvas;
@@ -296,8 +297,10 @@ class ClarityController {
         const h = height ?? this.canvas.parentElement?.clientHeight ?? window.innerHeight;
 
         if (w === 0 || h === 0) {
+            this.isReady = false;
             return;
         }
+        this.isReady = true;
 
         this.renderer.setSize(w, h, false);
         this.camera.updateProjectionMatrix();
@@ -392,12 +395,14 @@ class ClarityController {
         });
     }
 
-    private async _loadMedia() {
+    public async loadMedia() {
         const { mediaType, imageUrl, videoUrl } = this.props;
         const type = mediaType ?? 'image';
         const src = type === 'image' ? imageUrl : videoUrl;
         
-        if (!src || this.mediaState.loading) return;
+        if (!src || this.mediaState.loading || (this.mediaState.type === type && this.mediaState.src === src)) {
+            return;
+        }
 
         this.mediaState = { loading: true, type, src };
         this._cleanupPreviousMedia();
@@ -439,21 +444,12 @@ class ClarityController {
         if (this.isCancelled) return;
         this.animationFrameId = requestAnimationFrame(this._animate);
 
-        const parent = this.canvas.parentElement;
-        if (!parent || parent.clientWidth === 0 || parent.clientHeight === 0) {
+        if (!this.isReady) {
             return;
         }
 
-        const { mediaType, imageUrl, videoUrl, refrostRate, brushSize } = this.props;
-        const currentSrc = mediaType === 'image' ? imageUrl : videoUrl;
-        if (!this.mediaState.loading && (this.mediaState.type !== mediaType || this.mediaState.src !== currentSrc)) {
-            this._loadMedia();
-        }
-        
-        const brushPixelSize = Math.min(parent.clientWidth, parent.clientHeight) * (brushSize ?? 0.15);
+        const { refrostRate } = this.props;
         this.physicsMaterial.uniforms.uRefrostRate.value = refrostRate ?? 0.0004;
-        this.physicsMaterial.uniforms.uBrushSize.value = brushPixelSize;
-        this.mainMaterial.uniforms.uBrushSize.value = brushPixelSize;
 
         this.smoothedMouse.lerp(this.mousePosition, 0.1);
         this.refrostImpulse = THREE.MathUtils.lerp(this.refrostImpulse, 0.0, 0.1);
@@ -548,7 +544,20 @@ export default function Clarity(props: Partial<ClarityProps>) {
 
   useEffect(() => {
     controllerRef.current?.setProps(props);
+
+    // Debounce resize on prop changes (e.g. from Framer)
+    // This handles width, height, and brushSize changes efficiently.
+    const timeoutId = setTimeout(() => {
+        controllerRef.current?.resize();
+    }, 150);
+
+    return () => clearTimeout(timeoutId);
   }, [props]);
+
+  useEffect(() => {
+    // This effect handles loading media when the source props change.
+    controllerRef.current?.loadMedia();
+  }, [props.mediaType, props.imageUrl, props.videoUrl]);
 
   usePointerEvents(
     canvasRef,
