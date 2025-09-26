@@ -439,18 +439,24 @@ class ClarityController {
         if (this.isCancelled) return;
         this.animationFrameId = requestAnimationFrame(this._animate);
 
+        const parent = this.canvas.parentElement;
+        if (!parent || parent.clientWidth === 0 || parent.clientHeight === 0) {
+            return;
+        }
+
+        const currentSize = this.renderer.getSize(new THREE.Vector2());
+        if (currentSize.x !== parent.clientWidth || currentSize.y !== parent.clientHeight) {
+            this.resize();
+            return; 
+        }
+
         const { mediaType, imageUrl, videoUrl, refrostRate, brushSize } = this.props;
         const currentSrc = mediaType === 'image' ? imageUrl : videoUrl;
         if (!this.mediaState.loading && (this.mediaState.type !== mediaType || this.mediaState.src !== currentSrc)) {
             this._loadMedia();
         }
-
-        const sizeVec = this.renderer.getSize(new THREE.Vector2());
-        if (sizeVec.x === 0 || sizeVec.y === 0) {
-            return;
-        }
         
-        const brushPixelSize = Math.min(sizeVec.x, sizeVec.y) * (brushSize ?? 0.15);
+        const brushPixelSize = Math.min(parent.clientWidth, parent.clientHeight) * (brushSize ?? 0.15);
         this.physicsMaterial.uniforms.uRefrostRate.value = refrostRate ?? 0.0004;
         this.physicsMaterial.uniforms.uBrushSize.value = brushPixelSize;
         this.mainMaterial.uniforms.uBrushSize.value = brushPixelSize;
@@ -525,16 +531,10 @@ export default function Clarity(props: Partial<ClarityProps>) {
     const controller = new ClarityController(canvasRef.current, props);
     controllerRef.current = controller;
 
-    // Defer the initial resize to the next frame to ensure layout is calculated.
-    const initialResizeId = requestAnimationFrame(() => {
-        controller.resize();
-    });
-
     const handleResize = () => controller.resize();
     window.addEventListener('resize', handleResize);
     
     return () => {
-      cancelAnimationFrame(initialResizeId);
       window.removeEventListener('resize', handleResize);
       controller.dispose();
       controllerRef.current = null;
