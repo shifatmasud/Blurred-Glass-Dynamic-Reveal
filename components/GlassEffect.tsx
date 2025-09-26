@@ -3,7 +3,8 @@ import React, { useRef, useEffect } from 'react';
 import * as THREE from 'three';
 
 interface GlassEffectProps {
-  imageUrl: string;
+  imageUrl?: string;
+  videoUrl?: string;
   refrostRate: number;
 }
 
@@ -138,8 +139,14 @@ const fragmentShader = `
   uniform sampler2D uSceneTexture; // The sharp, aspect-corrected scene
   uniform sampler2D uPhysicsState; // r: clear, g: water, b: drip
   uniform sampler2D uBlurredMap; // The final blurred scene
+  uniform float uTime; // For animated grain
 
   varying vec2 vUv;
+
+  // Simple pseudo-random function
+  float rand(vec2 n) { 
+    return fract(sin(dot(n, vec2(12.9898, 4.1414))) * 43758.5453);
+  }
 
   void main() {
     vec4 physics = texture2D(uPhysicsState, vUv);
@@ -167,12 +174,16 @@ const fragmentShader = `
     // Add a subtle specular highlight to the water to make it look wet
     finalColor += pow(waterFactor, 2.0) * 0.15 + pow(dripFactor, 2.0) * 0.1;
 
+    // Add a subtle, animated grainy noise overlay for a more realistic glass texture
+    float noise = (rand(vUv * 2.0 + uTime) - 0.5) * 0.04; // Scaled uv for finer grain
+    finalColor += noise;
+
     gl_FragColor = vec4(finalColor, 1.0);
   }
 `;
 
 
-const GlassEffect: React.FC<GlassEffectProps> = ({ imageUrl, refrostRate }) => {
+const GlassEffect: React.FC<GlassEffectProps> = ({ imageUrl, videoUrl, refrostRate }) => {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const mousePosition = useRef({ x: -1000, y: -1000 });
   const isMouseActive = useRef(false);
@@ -226,6 +237,7 @@ const GlassEffect: React.FC<GlassEffectProps> = ({ imageUrl, refrostRate }) => {
     if (!canvasRef.current) return;
     const canvas = canvasRef.current;
     const DOWNSAMPLE_FACTOR = 2;
+    const clock = new THREE.Clock();
 
     const scene = new THREE.Scene();
     const camera = new THREE.OrthographicCamera(-1, 1, 1, -1, 0, 1);
@@ -242,6 +254,7 @@ const GlassEffect: React.FC<GlassEffectProps> = ({ imageUrl, refrostRate }) => {
         uSceneTexture: { value: null },
         uPhysicsState: { value: null },
         uBlurredMap: { value: null },
+        uTime: { value: 0.0 },
       },
     });
     scene.add(new THREE.Mesh(geometry, material));
@@ -331,6 +344,7 @@ const GlassEffect: React.FC<GlassEffectProps> = ({ imageUrl, refrostRate }) => {
     
     const animate = () => {
       mouseVector.lerp(mousePosition.current, 0.1);
+      material.uniforms.uTime.value = clock.getElapsedTime();
       
       // Physics pass
       renderer.setRenderTarget(physicsRenderTargetB);
@@ -375,42 +389,90 @@ const GlassEffect: React.FC<GlassEffectProps> = ({ imageUrl, refrostRate }) => {
 
     let isCancelled = false;
     let objectURL: string | null = null;
+    let videoElement: HTMLVideoElement | null = null;
 
-    const loadTextureAndStart = async () => {
+    const loadMediaAndStart = async () => {
       try {
-        const response = await fetch(imageUrl);
-        if (!response.ok) throw new Error(`HTTP error! status: ${response.status}`);
+        let texture: THREE.Texture;
+        let mediaResolution: THREE.Vector2;
+        
+        if (imageUrl) {
+            const response = await fetch(imageUrl);
+            if (!response.ok) throw new Error(`HTTP error! status: ${response.status}`);
+            if (isCancelled) return;
+
+            const blob = await response.blob();
+            objectURL = URL.createObjectURL(blob);
+            if (isCancelled) return;
+            
+            const textureLoader = new THREE.TextureLoader();
+            const imageTexture = await textureLoader.loadAsync(objectURL);
+            if (isCancelled) return;
+            
+            texture = imageTexture;
+            mediaResolution = new THREE.Vector2(texture.image.width, texture.image.height);
+        } else if (videoUrl) {
+            await new Promise<void>((resolve, reject) => {
+              videoElement = document.createElement('video');
+              videoElement.src = videoUrl;
+              videoElement.crossOrigin = 'anonymous';
+              videoElement.muted = true;
+              videoElement.loop = true;
+              videoElement.playsInline = true;
+
+              const onCanPlay = () => {
+                videoElement!.play().then(() => {
+                  if (isCancelled) return;
+                  texture = new THREE.VideoTexture(videoElement!);
+                  mediaResolution = new THREE.Vector2(videoElement!.videoWidth, videoElement!.videoHeight);
+                  cleanupListeners();
+                  resolve();
+                }).catch(reject);
+              };
+
+              const onError = () => {
+                cleanupListeners();
+                reject(new Error('Failed to load video. The source may be unsupported or blocked.'));
+              };
+              
+              const cleanupListeners = () => {
+                  videoElement?.removeEventListener('canplay', onCanPlay);
+                  videoElement?.removeEventListener('error', onError);
+              };
+
+              videoElement.addEventListener('canplay', onCanPlay);
+              videoElement.addEventListener('error', onError);
+              videoElement.load();
+            });
+        } else {
+            console.warn("GlassEffect: No imageUrl or videoUrl provided.");
+            return;
+        }
+
         if (isCancelled) return;
 
-        const blob = await response.blob();
-        objectURL = URL.createObjectURL(blob);
-        if (isCancelled) return;
-        
-        const textureLoader = new THREE.TextureLoader();
-        const texture = await textureLoader.loadAsync(objectURL);
-        if (isCancelled) return;
-
-        texture.colorSpace = THREE.SRGBColorSpace;
-        const imageRes = new THREE.Vector2(texture.image.width, texture.image.height);
-        
-        copyMaterial.uniforms.uTexture.value = texture;
-        copyMaterial.uniforms.uImageResolution.value.copy(imageRes);
+        texture!.colorSpace = THREE.SRGBColorSpace;
+        copyMaterial.uniforms.uTexture.value = texture!;
+        copyMaterial.uniforms.uImageResolution.value.copy(mediaResolution!);
         
         handleResize();
         if (!animationFrameId) animate();
 
       } catch (error) {
         const errorMessage = error instanceof Error ? error.message : String(error);
-        console.error('Failed to load texture:', errorMessage);
+        console.error('Failed to load media:', errorMessage);
       }
     };
 
-    loadTextureAndStart();
-    animate();
+    loadMediaAndStart();
 
     return () => {
       isCancelled = true;
       if (objectURL) URL.revokeObjectURL(objectURL);
+      if (videoElement) {
+        videoElement.pause();
+        videoElement.removeAttribute('src');
+      }
       window.removeEventListener('resize', handleResize);
       cancelAnimationFrame(animationFrameId);
       
@@ -429,7 +491,7 @@ const GlassEffect: React.FC<GlassEffectProps> = ({ imageUrl, refrostRate }) => {
       blurRenderTargetDownsampledA.dispose();
       blurRenderTargetDownsampledB.dispose();
     };
-  }, [imageUrl]);
+  }, [imageUrl, videoUrl]);
 
   return <canvas ref={canvasRef} className="w-full h-full" />;
 };

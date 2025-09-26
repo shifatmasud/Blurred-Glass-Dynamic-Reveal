@@ -4,6 +4,10 @@ import GlassEffect from './components/GlassEffect';
 
 const App: React.FC = () => {
   const [refrostRate, setRefrostRate] = useState(0.0004);
+  const [mediaType, setMediaType] = useState<'image' | 'video'>('image');
+
+  const imageUrl = "https://images.unsplash.com/photo-1470770841072-f978cf4d019e?q=80&w=2070&auto=format&fit=crop";
+  const videoUrl = "https://storage.googleapis.com/gtv-videos-bucket/sample/BigBuckBunny.mp4";
 
   return (
     <main className="relative flex flex-col items-center justify-center min-h-screen w-full text-white p-4 antialiased overflow-hidden">
@@ -19,7 +23,8 @@ const App: React.FC = () => {
 
       <div className="relative w-full max-w-4xl aspect-[16/9] shadow-2xl shadow-black/50 rounded-lg overflow-hidden animate-fade-in">
         <GlassEffect 
-            imageUrl="https://images.unsplash.com/photo-1470770841072-f978cf4d019e?q=80&w=2070&auto=format&fit=crop" 
+            imageUrl={mediaType === 'image' ? imageUrl : undefined}
+            videoUrl={mediaType === 'video' ? videoUrl : undefined}
             refrostRate={refrostRate} 
         />
         <div className="absolute inset-0 border border-white/10 rounded-lg pointer-events-none"></div>
@@ -46,6 +51,27 @@ const App: React.FC = () => {
               aria-label="Refrost Rate Slider"
             />
             <span className="text-sm text-gray-400 font-mono w-16 text-right">{Number(refrostRate).toFixed(4)}</span>
+        </div>
+        <div className="flex items-center justify-between gap-4 mt-4 pt-4 border-t border-white/10">
+             <label className="flex-shrink-0 text-sm font-medium text-gray-300 tracking-wide">
+                Background
+            </label>
+            <div className="flex items-center gap-2">
+                <button 
+                    onClick={() => setMediaType('image')} 
+                    className={`px-4 py-1 text-sm rounded-md transition-colors ${mediaType === 'image' ? 'bg-white text-black font-medium' : 'bg-white/10 text-white'}`}
+                    aria-pressed={mediaType === 'image'}
+                >
+                    Image
+                </button>
+                <button 
+                    onClick={() => setMediaType('video')}
+                    className={`px-4 py-1 text-sm rounded-md transition-colors ${mediaType === 'video' ? 'bg-white text-black font-medium' : 'bg-white/10 text-white'}`}
+                    aria-pressed={mediaType === 'video'}
+                >
+                    Video
+                </button>
+            </div>
         </div>
       </div>
 
