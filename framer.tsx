@@ -13,6 +13,7 @@ interface ClarityProps {
   height: number;
 }
 
+// --- Shaders ---
 const vertexShader = `
   varying vec2 vUv;
   void main() {
@@ -28,7 +29,6 @@ const physicsFragmentShader = `
   uniform float uBrushSize;
   uniform float uRefrostRate;
   uniform float uIsMouseActive;
-
   varying vec2 vUv;
 
   void main() {
@@ -53,10 +53,9 @@ const physicsFragmentShader = `
     drip += water * 0.01; // Water contributes to the drip amount
 
     // 3. Gravity pulls drips down (Advection)
-    // Sample from the pixel directly above to see if it was dripping
     vec2 dripOffset = vec2(0.0, 1.0 / uResolution.y) * 2.0; // Move down 2 pixels
     float incomingDrip = texture2D(uPreviousFrame, vUv - dripOffset).b;
-    drip = incomingDrip * 0.985; // Drips are advected downwards and slowly fade
+    drip = incomingDrip * 0.985;
 
     // 4. Drips clear a path in the frost
     clear = max(clear, drip * 0.9);
@@ -65,9 +64,8 @@ const physicsFragmentShader = `
     water *= 0.97;
 
     // 6. Frost slowly returns in non-wet, non-wiped areas
-    clear -= uRefrostRate * (1.0 - water); // Frost returns slower on wet areas
+    clear -= uRefrostRate * (1.0 - water);
 
-    // Clamp all values
     clear = clamp(clear, 0.0, 1.0);
     water = clamp(water, 0.0, 1.0);
     drip = clamp(drip, 0.0, 1.0);
@@ -89,11 +87,9 @@ const copyFragmentShader = `
           float imageAspect = uImageResolution.x / uImageResolution.y;
 
           if (canvasAspect > imageAspect) {
-              // Canvas is wider than the image, so we fit the image's width and crop the top/bottom.
               float scale = imageAspect / canvasAspect;
               st.y = st.y * scale + (1.0 - scale) / 2.0;
           } else {
-              // Canvas is taller than the image, so we fit the image's height and crop the sides.
               float scale = canvasAspect / imageAspect;
               st.x = st.x * scale + (1.0 - scale) / 2.0;
           }
@@ -111,7 +107,6 @@ const blurFragmentShader = `
   uniform sampler2D uInput;
   uniform vec2 uResolution;
   uniform vec2 uDirection;
-
   varying vec2 vUv;
 
   void main() {
@@ -134,8 +129,6 @@ const fragmentShader = `
   uniform sampler2D uSceneTexture;
   uniform sampler2D uPhysicsState;
   uniform sampler2D uBlurredMap;
-  uniform float uTime;
-
   varying vec2 vUv;
 
   float rand(vec2 n) { 
@@ -160,34 +153,269 @@ const fragmentShader = `
   }
 `;
 
-export default function Clarity({ mediaType, imageUrl, videoUrl, refrostRate, brushSize, width, height }: Partial<ClarityProps>) {
-  const canvasRef = useRef<HTMLCanvasElement>(null);
-  const mousePosition = useRef({ x: -1000, y: -1000 });
-  const isMouseActive = useRef(false);
+class ClarityController {
+    private canvas: HTMLCanvasElement;
+    private props: Partial<ClarityProps>;
 
-  const propsRef = useRef({ mediaType, imageUrl, videoUrl, refrostRate, brushSize, width, height });
+    private renderer: THREE.WebGLRenderer;
+    private clock: THREE.Clock;
+    private camera: THREE.OrthographicCamera;
+    
+    private mainScene: THREE.Scene;
+    private mainMaterial: THREE.ShaderMaterial;
+    
+    private copyScene: THREE.Scene;
+    private copyMaterial: THREE.ShaderMaterial;
+
+    private physicsScene: THREE.Scene;
+    private physicsMaterial: THREE.ShaderMaterial;
+
+    private blurScene: THREE.Scene;
+    private blurMaterial: THREE.ShaderMaterial;
+
+    private physicsRenderTargetA: THREE.WebGLRenderTarget;
+    private physicsRenderTargetB: THREE.WebGLRenderTarget;
+    private sceneRenderTarget: THREE.WebGLRenderTarget;
+    private blurRenderTargetA: THREE.WebGLRenderTarget;
+    private blurRenderTargetB: THREE.WebGLRenderTarget;
+
+    private mousePosition = new THREE.Vector2(-1000, -1000);
+    private smoothedMouse = new THREE.Vector2(-1000, -1000);
+    private isMouseActive = false;
+
+    private mediaState = { type: '', src: '', loading: false };
+    private objectURL: string | null = null;
+    private videoElement: HTMLVideoElement | null = null;
+    
+    private isCancelled = false;
+    private animationFrameId: number | null = null;
+    private static DOWNSAMPLE_FACTOR = 2;
+
+    constructor(canvas: HTMLCanvasElement, initialProps: Partial<ClarityProps>) {
+        this.canvas = canvas;
+        this.props = initialProps;
+        this.renderer = new THREE.WebGLRenderer({ canvas, antialias: true, alpha: true });
+        this.renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+        
+        this.clock = new THREE.Clock();
+        this.camera = new THREE.OrthographicCamera(-1, 1, 1, -1, 0, 1);
+        const geometry = new THREE.PlaneGeometry(2, 2);
+
+        this.mainMaterial = new THREE.ShaderMaterial({ vertexShader, fragmentShader, uniforms: { uResolution: { value: new THREE.Vector2() }, uSceneTexture: { value: null }, uPhysicsState: { value: null }, uBlurredMap: { value: null } } });
+        this.mainScene = new THREE.Scene();
+        this.mainScene.add(new THREE.Mesh(geometry, this.mainMaterial));
+
+        this.copyMaterial = new THREE.ShaderMaterial({ vertexShader, fragmentShader: copyFragmentShader, uniforms: { uTexture: { value: null }, uResolution: { value: new THREE.Vector2() }, uImageResolution: { value: new THREE.Vector2() } } });
+        this.copyScene = new THREE.Scene();
+        this.copyScene.add(new THREE.Mesh(geometry, this.copyMaterial));
+        
+        this.physicsMaterial = new THREE.ShaderMaterial({ vertexShader, fragmentShader: physicsFragmentShader, uniforms: { uPreviousFrame: { value: null }, uResolution: { value: new THREE.Vector2() }, uMouse: { value: new THREE.Vector2() }, uBrushSize: { value: 120.0 }, uRefrostRate: { value: 0.0004 }, uIsMouseActive: { value: 0.0 } } });
+        this.physicsScene = new THREE.Scene();
+        this.physicsScene.add(new THREE.Mesh(geometry, this.physicsMaterial));
+        
+        this.blurMaterial = new THREE.ShaderMaterial({ vertexShader, fragmentShader: blurFragmentShader, uniforms: { uInput: { value: null }, uResolution: { value: new THREE.Vector2() }, uDirection: { value: new THREE.Vector2() } } });
+        this.blurScene = new THREE.Scene();
+        this.blurScene.add(new THREE.Mesh(geometry, this.blurMaterial));
+
+        const renderTargetOptions = { minFilter: THREE.LinearFilter, magFilter: THREE.LinearFilter, format: THREE.RGBAFormat, type: THREE.HalfFloatType, stencilBuffer: false };
+        this.physicsRenderTargetA = new THREE.WebGLRenderTarget(1, 1, renderTargetOptions);
+        this.physicsRenderTargetB = new THREE.WebGLRenderTarget(1, 1, renderTargetOptions);
+        this.sceneRenderTarget = new THREE.WebGLRenderTarget(1, 1, renderTargetOptions);
+        this.blurRenderTargetA = new THREE.WebGLRenderTarget(1, 1, renderTargetOptions);
+        this.blurRenderTargetB = new THREE.WebGLRenderTarget(1, 1, renderTargetOptions);
+        
+        this.resize();
+        this.start();
+    }
+    
+    public setProps(newProps: Partial<ClarityProps>) { this.props = newProps; }
+    public updatePointer(x: number, y: number, isActive: boolean) {
+        this.isMouseActive = isActive;
+        if (isActive) { this.mousePosition.set(x, y); }
+    }
+    public resize = () => {
+        const { width, height, brushSize } = this.props;
+        const w = width ?? this.canvas.parentElement?.clientWidth ?? window.innerWidth;
+        const h = height ?? this.canvas.parentElement?.clientHeight ?? window.innerHeight;
+        this.renderer.setSize(w, h, false);
+        this.camera.updateProjectionMatrix();
+
+        const downsampledWidth = Math.round(w / ClarityController.DOWNSAMPLE_FACTOR);
+        const downsampledHeight = Math.round(h / ClarityController.DOWNSAMPLE_FACTOR);
+        
+        this.mainMaterial.uniforms.uResolution.value.set(w, h);
+        this.copyMaterial.uniforms.uResolution.value.set(w, h);
+        this.physicsMaterial.uniforms.uResolution.value.set(w, h);
+        this.physicsMaterial.uniforms.uBrushSize.value = Math.min(w, h) * (brushSize ?? 0.15);
+        this.blurMaterial.uniforms.uResolution.value.set(downsampledWidth, downsampledHeight);
+        
+        this.physicsRenderTargetA.setSize(w, h);
+        this.physicsRenderTargetB.setSize(w, h);
+        this.sceneRenderTarget.setSize(w, h);
+        this.blurRenderTargetA.setSize(downsampledWidth, downsampledHeight);
+        this.blurRenderTargetB.setSize(downsampledWidth, downsampledHeight);
+    }
+
+    private async _loadMedia() {
+        const { mediaType, imageUrl, videoUrl } = this.props;
+        const type = mediaType ?? 'image';
+        const src = type === 'image' ? imageUrl : videoUrl;
+        
+        if (!src) return;
+        this.mediaState = { loading: true, type, src };
+
+        if (this.objectURL) URL.revokeObjectURL(this.objectURL); this.objectURL = null;
+        if (this.videoElement) { this.videoElement.pause(); this.videoElement.removeAttribute('src'); this.videoElement = null; }
+        this.copyMaterial.uniforms.uTexture.value?.dispose();
+        this.copyMaterial.uniforms.uTexture.value = null;
+
+        try {
+            let texture: THREE.Texture;
+            let mediaResolution: THREE.Vector2;
+            if (type === 'image' && imageUrl) {
+                const response = await fetch(imageUrl);
+                if (!response.ok || this.isCancelled) return;
+                const blob = await response.blob();
+                this.objectURL = URL.createObjectURL(blob);
+                if (this.isCancelled) return;
+                texture = await new THREE.TextureLoader().loadAsync(this.objectURL);
+                mediaResolution = new THREE.Vector2(texture.image.width, texture.image.height);
+            } else if (type === 'video' && videoUrl) {
+                const result = await new Promise<{texture: THREE.VideoTexture, resolution: THREE.Vector2}>((resolve, reject) => {
+                  this.videoElement = document.createElement('video');
+                  this.videoElement.src = videoUrl;
+                  this.videoElement.crossOrigin = 'anonymous'; this.videoElement.muted = true; this.videoElement.loop = true; this.videoElement.playsInline = true;
+                  const onCanPlay = () => this.videoElement!.play().then(() => { if (!this.isCancelled) resolve({texture: new THREE.VideoTexture(this.videoElement!), resolution: new THREE.Vector2(this.videoElement!.videoWidth, this.videoElement!.videoHeight)}); }).catch(reject);
+                  this.videoElement.addEventListener('canplay', onCanPlay);
+                  this.videoElement.addEventListener('error', () => reject(new Error('Failed to load video.')));
+                  this.videoElement.load();
+                });
+                texture = result.texture;
+                mediaResolution = result.resolution;
+            } else { return; }
+            if (this.isCancelled) return;
+            texture!.colorSpace = THREE.SRGBColorSpace;
+            this.copyMaterial.uniforms.uTexture.value = texture!;
+            this.copyMaterial.uniforms.uImageResolution.value.copy(mediaResolution!);
+            this.resize();
+        } catch (error) { console.error('Failed to load media:', error); }
+        finally { this.mediaState.loading = false; }
+    }
+
+    private _animate = () => {
+        if (this.isCancelled) return;
+        this.animationFrameId = requestAnimationFrame(this._animate);
+
+        const { mediaType, imageUrl, videoUrl, refrostRate, brushSize } = this.props;
+        const currentSrc = mediaType === 'image' ? imageUrl : videoUrl;
+        if (!this.mediaState.loading && (this.mediaState.type !== mediaType || this.mediaState.src !== currentSrc)) {
+            this._loadMedia();
+        }
+
+        const sizeVec = this.renderer.getSize(new THREE.Vector2());
+        this.physicsMaterial.uniforms.uRefrostRate.value = refrostRate ?? 0.0004;
+        this.physicsMaterial.uniforms.uBrushSize.value = Math.min(sizeVec.x, sizeVec.y) * (brushSize ?? 0.15);
+        this.smoothedMouse.lerp(this.mousePosition, 0.1);
+        
+        this.renderer.setRenderTarget(this.physicsRenderTargetB);
+        this.physicsMaterial.uniforms.uPreviousFrame.value = this.physicsRenderTargetA.texture;
+        this.physicsMaterial.uniforms.uMouse.value.copy(this.smoothedMouse);
+        this.physicsMaterial.uniforms.uIsMouseActive.value = this.isMouseActive ? 1.0 : 0.0;
+        this.renderer.render(this.physicsScene, this.camera);
+        [this.physicsRenderTargetA, this.physicsRenderTargetB] = [this.physicsRenderTargetB, this.physicsRenderTargetA];
+
+        if (this.copyMaterial.uniforms.uTexture.value) {
+            this.renderer.setRenderTarget(this.sceneRenderTarget);
+            this.renderer.render(this.copyScene, this.camera);
+            
+            this.renderer.setRenderTarget(this.blurRenderTargetA);
+            this.blurMaterial.uniforms.uInput.value = this.sceneRenderTarget.texture;
+            this.blurMaterial.uniforms.uDirection.value.set(1.0, 0.0);
+            this.renderer.render(this.blurScene, this.camera);
+
+            this.renderer.setRenderTarget(this.blurRenderTargetB);
+            this.blurMaterial.uniforms.uInput.value = this.blurRenderTargetA.texture;
+            this.blurMaterial.uniforms.uDirection.value.set(0.0, 1.0);
+            this.renderer.render(this.blurScene, this.camera);
+            
+            this.renderer.setRenderTarget(null);
+            this.mainMaterial.uniforms.uPhysicsState.value = this.physicsRenderTargetA.texture;
+            this.mainMaterial.uniforms.uSceneTexture.value = this.sceneRenderTarget.texture;
+            this.mainMaterial.uniforms.uBlurredMap.value = this.blurRenderTargetB.texture;
+            this.renderer.render(this.mainScene, this.camera);
+        } else {
+            this.renderer.setRenderTarget(null);
+            this.renderer.clear();
+        }
+    }
+    
+    public start() { this._animate(); }
+
+    public dispose() {
+        this.isCancelled = true;
+        if (this.animationFrameId) cancelAnimationFrame(this.animationFrameId);
+        if (this.objectURL) URL.revokeObjectURL(this.objectURL);
+        if (this.videoElement) { this.videoElement.pause(); this.videoElement.removeAttribute('src'); }
+        this.renderer.dispose();
+        this.mainScene.traverse(obj => { if (obj instanceof THREE.Mesh) obj.geometry.dispose(); });
+        this.mainMaterial.dispose();
+        this.copyMaterial.dispose();
+        this.physicsMaterial.dispose();
+        this.blurMaterial.dispose();
+        this.physicsRenderTargetA.dispose();
+        this.physicsRenderTargetB.dispose();
+        this.sceneRenderTarget.dispose();
+        this.blurRenderTargetA.dispose();
+        this.blurRenderTargetB.dispose();
+    }
+}
+
+
+export default function Clarity(props: Partial<ClarityProps>) {
+  const canvasRef = useRef<HTMLCanvasElement>(null);
+  const controllerRef = useRef<ClarityController | null>(null);
+
   useEffect(() => {
-    propsRef.current = { mediaType, imageUrl, videoUrl, refrostRate, brushSize, width, height };
-  });
+    if (!canvasRef.current) return;
+    
+    const controller = new ClarityController(canvasRef.current, props);
+    controllerRef.current = controller;
+
+    window.addEventListener('resize', controller.resize);
+    
+    return () => {
+      window.removeEventListener('resize', controller.resize);
+      controller.dispose();
+      controllerRef.current = null;
+    };
+  }, []);
+
+  useEffect(() => {
+    controllerRef.current?.setProps(props);
+  }, [props]);
 
   useEffect(() => {
     const canvas = canvasRef.current;
     if (!canvas) return;
+
     const updateMousePosition = (clientX: number, clientY: number) => {
-        if (!canvasRef.current) return;
-        const rect = canvasRef.current.getBoundingClientRect();
-        if (!isMouseActive.current) isMouseActive.current = true;
-        mousePosition.current = { x: clientX - rect.left, y: rect.height - (clientY - rect.top) };
+        const rect = canvas.getBoundingClientRect();
+        const x = clientX - rect.left;
+        const y = rect.height - (clientY - rect.top);
+        controllerRef.current?.updatePointer(x, y, true);
     };
+
     const handleMouseMove = (event: MouseEvent) => updateMousePosition(event.clientX, event.clientY);
-    const handleMouseLeave = () => { isMouseActive.current = false; };
+    const handleMouseLeave = () => controllerRef.current?.updatePointer(0, 0, false);
     const handleTouchMove = (event: TouchEvent) => { if (event.touches.length > 0) updateMousePosition(event.touches[0].clientX, event.touches[0].clientY); };
-    const handleTouchEnd = () => { isMouseActive.current = false; };
+    const handleTouchEnd = () => controllerRef.current?.updatePointer(0, 0, false);
+    
     canvas.addEventListener('mousemove', handleMouseMove);
     canvas.addEventListener('mouseleave', handleMouseLeave);
     canvas.addEventListener('touchmove', handleTouchMove, { passive: true });
     canvas.addEventListener('touchend', handleTouchEnd);
     canvas.addEventListener('touchcancel', handleTouchEnd);
+
     return () => {
       canvas.removeEventListener('mousemove', handleMouseMove);
       canvas.removeEventListener('mouseleave', handleMouseLeave);
@@ -197,200 +425,9 @@ export default function Clarity({ mediaType, imageUrl, videoUrl, refrostRate, br
     };
   }, []);
 
-  useEffect(() => {
-    if (!canvasRef.current) return;
-    const canvas = canvasRef.current;
-    let isCancelled = false;
-
-    const DOWNSAMPLE_FACTOR = 2;
-    const clock = new THREE.Clock();
-    const scene = new THREE.Scene();
-    const camera = new THREE.OrthographicCamera(-1, 1, 1, -1, 0, 1);
-    const renderer = new THREE.WebGLRenderer({ canvas, antialias: true, alpha: true });
-    renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
-    const geometry = new THREE.PlaneGeometry(2, 2);
-    const material = new THREE.ShaderMaterial({ vertexShader, fragmentShader, uniforms: { uResolution: { value: new THREE.Vector2() }, uSceneTexture: { value: null }, uPhysicsState: { value: null }, uBlurredMap: { value: null }, uTime: { value: 0.0 } } });
-    scene.add(new THREE.Mesh(geometry, material));
-    const copyScene = new THREE.Scene();
-    const copyMaterial = new THREE.ShaderMaterial({ vertexShader, fragmentShader: copyFragmentShader, uniforms: { uTexture: { value: null }, uResolution: { value: new THREE.Vector2() }, uImageResolution: { value: new THREE.Vector2() } } });
-    copyScene.add(new THREE.Mesh(geometry, copyMaterial));
-    const physicsScene = new THREE.Scene();
-    const physicsMaterial = new THREE.ShaderMaterial({ vertexShader, fragmentShader: physicsFragmentShader, uniforms: { uPreviousFrame: { value: null }, uResolution: { value: new THREE.Vector2() }, uMouse: { value: new THREE.Vector2() }, uBrushSize: { value: 120.0 }, uRefrostRate: { value: 0.0004 }, uIsMouseActive: { value: 0.0 } } });
-    physicsScene.add(new THREE.Mesh(geometry, physicsMaterial));
-    const blurScene = new THREE.Scene();
-    const blurMaterial = new THREE.ShaderMaterial({ vertexShader, fragmentShader: blurFragmentShader, uniforms: { uInput: { value: null }, uResolution: { value: new THREE.Vector2() }, uDirection: { value: new THREE.Vector2() } } });
-    blurScene.add(new THREE.Mesh(geometry, blurMaterial));
-    const renderTargetOptions = { minFilter: THREE.LinearFilter, magFilter: THREE.LinearFilter, format: THREE.RGBAFormat, type: THREE.HalfFloatType, stencilBuffer: false };
-    let physicsRenderTargetA = new THREE.WebGLRenderTarget(1, 1, renderTargetOptions);
-    let physicsRenderTargetB = new THREE.WebGLRenderTarget(1, 1, renderTargetOptions);
-    let sceneRenderTarget = new THREE.WebGLRenderTarget(1, 1, renderTargetOptions);
-    let blurRenderTargetDownsampledA = new THREE.WebGLRenderTarget(1, 1, renderTargetOptions);
-    let blurRenderTargetDownsampledB = new THREE.WebGLRenderTarget(1, 1, renderTargetOptions);
-    const mouseVector = new THREE.Vector2(-1000, -1000);
-
-    const handleResize = () => {
-        const { width, height, brushSize } = propsRef.current;
-        const w = width ?? canvas.parentElement?.clientWidth ?? window.innerWidth;
-        const h = height ?? canvas.parentElement?.clientHeight ?? window.innerHeight;
-        renderer.setSize(w, h, false);
-        camera.updateProjectionMatrix();
-        const downsampledWidth = Math.round(w / DOWNSAMPLE_FACTOR);
-        const downsampledHeight = Math.round(h / DOWNSAMPLE_FACTOR);
-        material.uniforms.uResolution.value.set(w, h);
-        copyMaterial.uniforms.uResolution.value.set(w, h);
-        physicsMaterial.uniforms.uResolution.value.set(w, h);
-        physicsMaterial.uniforms.uBrushSize.value = Math.min(w, h) * (brushSize ?? 0.15);
-        blurMaterial.uniforms.uResolution.value.set(downsampledWidth, downsampledHeight);
-        physicsRenderTargetA.setSize(w, h);
-        physicsRenderTargetB.setSize(w, h);
-        sceneRenderTarget.setSize(w, h);
-        blurRenderTargetDownsampledA.setSize(downsampledWidth, downsampledHeight);
-        blurRenderTargetDownsampledB.setSize(downsampledWidth, downsampledHeight);
-    };
-    
-    let objectURL: string | null = null;
-    let videoElement: HTMLVideoElement | null = null;
-    const mediaState = {
-        type: '',
-        src: '',
-        loading: false,
-    };
-
-    const loadMedia = async () => {
-        const { mediaType, imageUrl, videoUrl } = propsRef.current;
-        const type = mediaType ?? 'image';
-        const src = type === 'image' ? imageUrl : videoUrl;
-        
-        if (!src) return;
-
-        mediaState.loading = true;
-        mediaState.type = type;
-        mediaState.src = src;
-
-        if (objectURL) URL.revokeObjectURL(objectURL); objectURL = null;
-        if (videoElement) { videoElement.pause(); videoElement.removeAttribute('src'); videoElement = null; }
-        copyMaterial.uniforms.uTexture.value?.dispose();
-        copyMaterial.uniforms.uTexture.value = null;
-
-        try {
-            let texture: THREE.Texture;
-            let mediaResolution: THREE.Vector2;
-            if (type === 'image' && imageUrl) {
-                const response = await fetch(imageUrl);
-                if (!response.ok) throw new Error(`HTTP error! status: ${response.status}`);
-                if (isCancelled) return;
-                const blob = await response.blob();
-                objectURL = URL.createObjectURL(blob);
-                if (isCancelled) return;
-                const textureLoader = new THREE.TextureLoader();
-                texture = await textureLoader.loadAsync(objectURL);
-                if (isCancelled) return;
-                mediaResolution = new THREE.Vector2(texture.image.width, texture.image.height);
-            } else if (type === 'video' && videoUrl) {
-                const result = await new Promise<{texture: THREE.VideoTexture, resolution: THREE.Vector2}>((resolve, reject) => {
-                  videoElement = document.createElement('video');
-                  videoElement.src = videoUrl;
-                  videoElement.crossOrigin = 'anonymous'; videoElement.muted = true; videoElement.loop = true; videoElement.playsInline = true;
-                  const onCanPlay = () => {
-                    videoElement!.play().then(() => {
-                        if (isCancelled) return;
-                        const videoTexture = new THREE.VideoTexture(videoElement!);
-                        const resolution = new THREE.Vector2(videoElement!.videoWidth, videoElement!.videoHeight);
-                        cleanupListeners();
-                        resolve({texture: videoTexture, resolution: resolution});
-                    }).catch(reject);
-                  };
-                  const onError = () => { cleanupListeners(); reject(new Error('Failed to load video.')); };
-                  const cleanupListeners = () => { videoElement?.removeEventListener('canplay', onCanPlay); videoElement?.removeEventListener('error', onError); };
-                  videoElement.addEventListener('canplay', onCanPlay); videoElement.addEventListener('error', onError); videoElement.load();
-                });
-                texture = result.texture;
-                mediaResolution = result.resolution;
-            } else { return; }
-            if (isCancelled) return;
-            texture!.colorSpace = THREE.SRGBColorSpace;
-            copyMaterial.uniforms.uTexture.value = texture!;
-            copyMaterial.uniforms.uImageResolution.value.copy(mediaResolution!);
-            handleResize();
-        } catch (error) { console.error('Failed to load media:', error instanceof Error ? error.message : String(error)); }
-        finally {
-          mediaState.loading = false;
-        }
-    };
-    
-    let animationFrameId: number;
-    const sizeVec = new THREE.Vector2();
-    const animate = () => {
-      animationFrameId = requestAnimationFrame(animate);
-
-      const { mediaType, imageUrl, videoUrl, refrostRate, brushSize } = propsRef.current;
-      const currentSrc = mediaType === 'image' ? imageUrl : videoUrl;
-      if (!mediaState.loading && (mediaState.type !== mediaType || mediaState.src !== currentSrc)) {
-          loadMedia();
-      }
-
-      renderer.getSize(sizeVec);
-      physicsMaterial.uniforms.uRefrostRate.value = refrostRate ?? 0.0004;
-      physicsMaterial.uniforms.uBrushSize.value = Math.min(sizeVec.x, sizeVec.y) * (brushSize ?? 0.15);
-      mouseVector.lerp(mousePosition.current, 0.1);
-      material.uniforms.uTime.value = clock.getElapsedTime();
-      renderer.setRenderTarget(physicsRenderTargetB);
-      physicsMaterial.uniforms.uPreviousFrame.value = physicsRenderTargetA.texture;
-      physicsMaterial.uniforms.uMouse.value.copy(mouseVector);
-      physicsMaterial.uniforms.uIsMouseActive.value = isMouseActive.current ? 1.0 : 0.0;
-      renderer.render(physicsScene, camera);
-      let tempPhysics = physicsRenderTargetA;
-      physicsRenderTargetA = physicsRenderTargetB;
-      physicsRenderTargetB = tempPhysics;
-      if (copyMaterial.uniforms.uTexture.value) {
-        renderer.setRenderTarget(sceneRenderTarget);
-        renderer.render(copyScene, camera);
-        renderer.setRenderTarget(blurRenderTargetDownsampledA);
-        blurMaterial.uniforms.uInput.value = sceneRenderTarget.texture;
-        blurMaterial.uniforms.uDirection.value.set(1.0, 0.0);
-        renderer.render(blurScene, camera);
-        renderer.setRenderTarget(blurRenderTargetDownsampledB);
-        blurMaterial.uniforms.uInput.value = blurRenderTargetDownsampledA.texture;
-        blurMaterial.uniforms.uDirection.value.set(0.0, 1.0);
-        renderer.render(blurScene, camera);
-        renderer.setRenderTarget(null);
-        material.uniforms.uPhysicsState.value = physicsRenderTargetA.texture;
-        material.uniforms.uSceneTexture.value = sceneRenderTarget.texture;
-        material.uniforms.uBlurredMap.value = blurRenderTargetDownsampledB.texture;
-        renderer.render(scene, camera);
-      } else {
-        renderer.setRenderTarget(null);
-        renderer.clear();
-      }
-    };
-
-    handleResize();
-    animate();
-    window.addEventListener('resize', handleResize);
-
-    return () => {
-      isCancelled = true;
-      window.removeEventListener('resize', handleResize);
-      cancelAnimationFrame(animationFrameId);
-      if (objectURL) URL.revokeObjectURL(objectURL);
-      if (videoElement) { videoElement.pause(); videoElement.removeAttribute('src'); }
-      renderer.dispose();
-      geometry.dispose();
-      copyMaterial.uniforms.uTexture.value?.dispose();
-      copyMaterial.dispose();
-      material.dispose();
-      physicsMaterial.dispose();
-      blurMaterial.dispose();
-      physicsRenderTargetA.dispose();
-      physicsRenderTargetB.dispose();
-      sceneRenderTarget.dispose();
-      blurRenderTargetDownsampledA.dispose();
-      blurRenderTargetDownsampledB.dispose();
-    };
-  }, []);
-
   return <canvas ref={canvasRef} className="w-full h-full" style={{ display: 'block' }} />;
 };
+
 //@ts-ignore
 Clarity.defaultProps = {
     mediaType: 'image',
@@ -400,39 +437,9 @@ Clarity.defaultProps = {
 }
 
 addPropertyControls(Clarity, {
-    mediaType: {
-        type: ControlType.Enum,
-        title: "Media",
-        options: ['image', 'video'],
-        defaultValue: 'image',
-    },
-    imageUrl: {
-        type: ControlType.Image,
-        title: "Image",
-        hidden: (props) => props.mediaType !== 'image',
-    },
-    videoUrl: {
-        type: ControlType.File,
-        title: "Video",
-        allowedFileTypes: ['mp4', 'webm', 'mov'],
-        hidden: (props) => props.mediaType !== 'video',
-    },
-    refrostRate: {
-        type: ControlType.Number,
-        title: "Refrost Rate",
-        min: 0,
-        max: 0.005,
-        step: 0.0001,
-        defaultValue: 0.0004,
-        displayStepper: true,
-    },
-    brushSize: {
-        type: ControlType.Number,
-        title: "Pointer Size",
-        min: 0.05,
-        max: 0.5,
-        step: 0.01,
-        defaultValue: 0.15,
-        displayStepper: true,
-    },
+    mediaType: { type: ControlType.Enum, title: "Media", options: ['image', 'video'], defaultValue: 'image' },
+    imageUrl: { type: ControlType.Image, title: "Image", hidden: (props) => props.mediaType !== 'image' },
+    videoUrl: { type: ControlType.File, title: "Video", allowedFileTypes: ['mp4', 'webm', 'mov'], hidden: (props) => props.mediaType !== 'video' },
+    refrostRate: { type: ControlType.Number, title: "Refrost Rate", min: 0, max: 0.005, step: 0.0001, defaultValue: 0.0004, displayStepper: true },
+    brushSize: { type: ControlType.Number, title: "Pointer Size", min: 0.05, max: 0.5, step: 0.01, defaultValue: 0.15, displayStepper: true },
 });
