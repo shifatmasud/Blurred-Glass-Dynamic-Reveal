@@ -1,10 +1,10 @@
-
 import React, { useState } from 'react';
 import GlassEffect from './components/GlassEffect';
 
 const App: React.FC = () => {
   const [refrostRate, setRefrostRate] = useState(0.0004);
   const [mediaType, setMediaType] = useState<'image' | 'video'>('image');
+  const [brushSize, setBrushSize] = useState(0.15);
 
   const imageUrl = "https://images.unsplash.com/photo-1470770841072-f978cf4d019e?q=80&w=2070&auto=format&fit=crop";
   const videoUrl = "https://storage.googleapis.com/gtv-videos-bucket/sample/BigBuckBunny.mp4";
@@ -26,6 +26,7 @@ const App: React.FC = () => {
             imageUrl={mediaType === 'image' ? imageUrl : undefined}
             videoUrl={mediaType === 'video' ? videoUrl : undefined}
             refrostRate={refrostRate} 
+            brushSize={brushSize}
         />
         <div className="absolute inset-0 border border-white/10 rounded-lg pointer-events-none"></div>
       </div>
@@ -51,6 +52,23 @@ const App: React.FC = () => {
               aria-label="Refrost Rate Slider"
             />
             <span className="text-sm text-gray-400 font-mono w-16 text-right">{Number(refrostRate).toFixed(4)}</span>
+        </div>
+        <div className="flex items-center justify-between gap-4 mt-4 pt-4 border-t border-white/10">
+            <label htmlFor="brush-slider" className="flex-shrink-0 text-sm font-medium text-gray-300 tracking-wide">
+                Pointer <span className="hidden sm:inline">Size</span>
+            </label>
+            <input
+              id="brush-slider"
+              type="range"
+              min="0.05"
+              max="0.5"
+              step="0.01"
+              value={brushSize}
+              onChange={(e) => setBrushSize(parseFloat(e.target.value))}
+              className="custom-slider"
+              aria-label="Pointer Size Slider"
+            />
+            <span className="text-sm text-gray-400 font-mono w-16 text-right">{Number(brushSize).toFixed(2)}</span>
         </div>
         <div className="flex items-center justify-between gap-4 mt-4 pt-4 border-t border-white/10">
              <label className="flex-shrink-0 text-sm font-medium text-gray-300 tracking-wide">

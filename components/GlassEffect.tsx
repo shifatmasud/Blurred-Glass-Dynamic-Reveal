@@ -1,4 +1,3 @@
-
 import React, { useRef, useEffect } from 'react';
 import * as THREE from 'three';
 
@@ -6,6 +5,7 @@ interface GlassEffectProps {
   imageUrl?: string;
   videoUrl?: string;
   refrostRate: number;
+  brushSize: number;
 }
 
 const vertexShader = `
@@ -174,20 +174,35 @@ const fragmentShader = `
     // Add a subtle specular highlight to the water to make it look wet
     finalColor += pow(waterFactor, 2.0) * 0.15 + pow(dripFactor, 2.0) * 0.1;
 
-    // Add a subtle, animated grainy noise overlay for a more realistic glass texture
-    float noise = (rand(vUv * 2.0 + uTime) - 0.5) * 0.04; // Scaled uv for finer grain
-    finalColor += noise;
+    // Add a subtle, animated grainy noise overlay that fades in cleared areas
+    float noise = (rand(vUv * 2.0 + uTime) - 0.5) * 0.04;
+    finalColor += noise * (1.0 - revealFactor);
 
     gl_FragColor = vec4(finalColor, 1.0);
   }
 `;
 
 
-const GlassEffect: React.FC<GlassEffectProps> = ({ imageUrl, videoUrl, refrostRate }) => {
+const GlassEffect: React.FC<GlassEffectProps> = ({ imageUrl, videoUrl, refrostRate, brushSize }) => {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const mousePosition = useRef({ x: -1000, y: -1000 });
   const isMouseActive = useRef(false);
   const physicsMaterialRef = useRef<THREE.ShaderMaterial | null>(null);
+  const brushSizeRef = useRef(brushSize);
+
+  useEffect(() => {
+    brushSizeRef.current = brushSize;
+  }, [brushSize]);
+
+  useEffect(() => {
+    const canvas = canvasRef.current;
+    const material = physicsMaterialRef.current;
+    const parent = canvas?.parentElement;
+    if (material && parent) {
+      const { clientWidth: width, clientHeight: height } = parent;
+      material.uniforms.uBrushSize.value = Math.min(width, height) * brushSize;
+    }
+  }, [brushSize]);
 
   useEffect(() => {
     const canvas = canvasRef.current;
@@ -328,7 +343,7 @@ const GlassEffect: React.FC<GlassEffectProps> = ({ imageUrl, videoUrl, refrostRa
         material.uniforms.uResolution.value.set(width, height);
         copyMaterial.uniforms.uResolution.value.set(width, height);
         physicsMaterial.uniforms.uResolution.value.set(width, height);
-        physicsMaterial.uniforms.uBrushSize.value = Math.min(width, height) * 0.15;
+        physicsMaterial.uniforms.uBrushSize.value = Math.min(width, height) * brushSizeRef.current;
         blurMaterial.uniforms.uResolution.value.set(downsampledWidth, downsampledHeight);
 
         physicsRenderTargetA.setSize(width, height);
