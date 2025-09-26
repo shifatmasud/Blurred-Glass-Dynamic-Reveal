@@ -242,7 +242,6 @@ class ClarityController {
     private refrostImpulse = 0.0;
 
     private mediaState = { type: '', src: '', loading: false };
-    private objectURL: string | null = null;
     private videoElement: HTMLVideoElement | null = null;
     
     private isCancelled = false;
@@ -318,10 +317,6 @@ class ClarityController {
     }
     
     private _cleanupPreviousMedia() {
-        if (this.objectURL) {
-            URL.revokeObjectURL(this.objectURL);
-            this.objectURL = null;
-        }
         if (this.videoElement) {
             this.videoElement.pause();
             this.videoElement.removeAttribute('src');
@@ -335,15 +330,10 @@ class ClarityController {
     }
     
     private async _loadImageTexture(imageUrl: string): Promise<{ texture: THREE.Texture, resolution: THREE.Vector2 }> {
-        const response = await fetch(imageUrl);
-        if (!response.ok) throw new Error(`Failed to fetch image: ${response.statusText}`);
-        if (this.isCancelled) throw new Error('Component unmounted during fetch');
+        const loader = new THREE.TextureLoader();
+        loader.setCrossOrigin('anonymous');
+        const texture = await loader.loadAsync(imageUrl);
 
-        const blob = await response.blob();
-        this.objectURL = URL.createObjectURL(blob);
-        if (this.isCancelled) throw new Error('Component unmounted during blob creation');
-
-        const texture = await new THREE.TextureLoader().loadAsync(this.objectURL);
         if (this.isCancelled) {
             texture.dispose();
             throw new Error('Component unmounted during texture load');
@@ -565,7 +555,7 @@ Clarity.defaultProps = {
     refrostRate: 0.0004,
     brushSize: 0.15,
     refrostTrigger: 0,
-}
+} 
 
 addPropertyControls(Clarity, {
     mediaType: { type: ControlType.Enum, title: "Media", options: ['image', 'video'], defaultValue: 'image' },
