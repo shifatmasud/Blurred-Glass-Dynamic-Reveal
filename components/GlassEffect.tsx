@@ -182,36 +182,37 @@ const GlassEffect: React.FC<GlassEffectProps> = ({ imageUrl, refrostRate }) => {
     const canvas = canvasRef.current;
     if (!canvas) return;
 
-    const handleMouseMove = (event: MouseEvent) => {
-      if (!isMouseActive.current) isMouseActive.current = true;
-      mousePosition.current = { x: event.clientX, y: event.clientY };
-    };
-    const handleMouseLeave = () => {
-      isMouseActive.current = false;
-    };
-    const handleTouchMove = (event: TouchEvent) => {
-      if (event.touches.length > 0) {
+    const updateMousePosition = (clientX: number, clientY: number) => {
+        if (!canvasRef.current) return;
+        const rect = canvasRef.current.getBoundingClientRect();
         if (!isMouseActive.current) isMouseActive.current = true;
-        const touch = event.touches[0];
-        mousePosition.current = { x: touch.clientX, y: touch.clientY };
-      }
-    };
-    const handleTouchEnd = () => {
-        isMouseActive.current = false;
+        mousePosition.current = {
+            x: clientX - rect.left,
+            y: rect.height - (clientY - rect.top), // Flipped Y for WebGL coords
+        };
     };
 
-    window.addEventListener('mousemove', handleMouseMove);
-    document.body.addEventListener('mouseleave', handleMouseLeave);
-    window.addEventListener('touchmove', handleTouchMove);
-    window.addEventListener('touchend', handleTouchEnd);
-    window.addEventListener('touchcancel', handleTouchEnd);
+    const handleMouseMove = (event: MouseEvent) => updateMousePosition(event.clientX, event.clientY);
+    const handleMouseLeave = () => { isMouseActive.current = false; };
+    const handleTouchMove = (event: TouchEvent) => {
+        if (event.touches.length > 0) {
+            updateMousePosition(event.touches[0].clientX, event.touches[0].clientY);
+        }
+    };
+    const handleTouchEnd = () => { isMouseActive.current = false; };
+
+    canvas.addEventListener('mousemove', handleMouseMove);
+    canvas.addEventListener('mouseleave', handleMouseLeave);
+    canvas.addEventListener('touchmove', handleTouchMove, { passive: true });
+    canvas.addEventListener('touchend', handleTouchEnd);
+    canvas.addEventListener('touchcancel', handleTouchEnd);
     
     return () => {
-      window.removeEventListener('mousemove', handleMouseMove);
-      document.body.removeEventListener('mouseleave', handleMouseLeave);
-      window.addEventListener('touchmove', handleTouchMove);
-      window.addEventListener('touchend', handleTouchEnd);
-      window.addEventListener('touchcancel', handleTouchEnd);
+      canvas.removeEventListener('mousemove', handleMouseMove);
+      canvas.removeEventListener('mouseleave', handleMouseLeave);
+      canvas.removeEventListener('touchmove', handleTouchMove);
+      canvas.removeEventListener('touchend', handleTouchEnd);
+      canvas.removeEventListener('touchcancel', handleTouchEnd);
     };
   }, []);
 
@@ -314,6 +315,7 @@ const GlassEffect: React.FC<GlassEffectProps> = ({ imageUrl, refrostRate }) => {
         material.uniforms.uResolution.value.set(width, height);
         copyMaterial.uniforms.uResolution.value.set(width, height);
         physicsMaterial.uniforms.uResolution.value.set(width, height);
+        physicsMaterial.uniforms.uBrushSize.value = Math.min(width, height) * 0.15;
         blurMaterial.uniforms.uResolution.value.set(downsampledWidth, downsampledHeight);
 
         physicsRenderTargetA.setSize(width, height);
@@ -328,7 +330,7 @@ const GlassEffect: React.FC<GlassEffectProps> = ({ imageUrl, refrostRate }) => {
     let animationFrameId: number;
     
     const animate = () => {
-      mouseVector.lerp(new THREE.Vector2(mousePosition.current.x, window.innerHeight - mousePosition.current.y), 0.1);
+      mouseVector.lerp(mousePosition.current, 0.1);
       
       // Physics pass
       renderer.setRenderTarget(physicsRenderTargetB);

@@ -1,5 +1,6 @@
-import React, { useRef, useEffect, useLayoutEffect, useState } from "react"
-import * as framer from "framer"
+import React, { useRef, useEffect, useLayoutEffect, useState, CSSProperties } from "react"
+// FIX: Changed framer import to directly import addPropertyControls and ControlType.
+import { addPropertyControls, ControlType } from "framer"
 import * as THREE from "three"
 import html2canvas from "html2canvas"
 
@@ -152,6 +153,28 @@ const fragmentShader = `
 `
 const DOWNSAMPLE_FACTOR = 2;
 
+// Type definition for robust state management
+type ThreeState = {
+    renderer: THREE.WebGLRenderer;
+    camera: THREE.OrthographicCamera;
+    geometry: THREE.PlaneGeometry;
+    scene: THREE.Scene;
+    material: THREE.ShaderMaterial;
+    copyScene: THREE.Scene;
+    copyMaterial: THREE.ShaderMaterial;
+    physicsScene: THREE.Scene;
+    physicsMaterial: THREE.ShaderMaterial;
+    blurScene: THREE.Scene;
+    blurMaterial: THREE.ShaderMaterial;
+    physicsRenderTargetA: THREE.WebGLRenderTarget;
+    physicsRenderTargetB: THREE.WebGLRenderTarget;
+    sceneRenderTarget: THREE.WebGLRenderTarget;
+    blurRenderTargetDownsampledA: THREE.WebGLRenderTarget;
+    blurRenderTargetDownsampledB: THREE.WebGLRenderTarget;
+    mouseVector: THREE.Vector2;
+    animationFrameId: number;
+};
+
 export default function Goo(props) {
     const {
         imageUrl,
@@ -166,7 +189,7 @@ export default function Goo(props) {
     const contentCaptureRef = useRef<HTMLDivElement>(null);
     const mousePosition = useRef({ x: -1000, y: -1000 });
     const isMouseActive = useRef(false);
-    const threeState = useRef<any>({});
+    const threeState = useRef<Partial<ThreeState>>({});
 
     const debouncedWidth = useDebounce(width, 300);
     const debouncedHeight = useDebounce(height, 300);
@@ -181,7 +204,6 @@ export default function Goo(props) {
             const rect = canvasRef.current.getBoundingClientRect();
             if (!isMouseActive.current) isMouseActive.current = true;
             // Calculate mouse position relative to the canvas and flip the Y-axis
-            // for WebGL's coordinate system (0,0 is bottom-left).
             mousePosition.current = {
                 x: clientX - rect.left,
                 y: rect.height - (clientY - rect.top),
@@ -229,9 +251,9 @@ export default function Goo(props) {
         state.camera = new THREE.OrthographicCamera(-1, 1, 1, -1, 0, 1);
         state.geometry = new THREE.PlaneGeometry(2, 2);
 
-        const material = new THREE.ShaderMaterial({ vertexShader, fragmentShader, uniforms: { uResolution: { value: new THREE.Vector2() }, uSceneTexture: { value: null }, uPhysicsState: { value: null }, uBlurredMap: { value: null } } });
+        state.material = new THREE.ShaderMaterial({ vertexShader, fragmentShader, uniforms: { uResolution: { value: new THREE.Vector2() }, uSceneTexture: { value: null }, uPhysicsState: { value: null }, uBlurredMap: { value: null } } });
         state.scene = new THREE.Scene();
-        state.scene.add(new THREE.Mesh(state.geometry, material));
+        state.scene.add(new THREE.Mesh(state.geometry, state.material));
 
         state.copyMaterial = new THREE.ShaderMaterial({ vertexShader, fragmentShader: copyFragmentShader, uniforms: { uTexture: { value: null }, uResolution: { value: new THREE.Vector2() }, uImageResolution: { value: new THREE.Vector2() } } });
         state.copyScene = new THREE.Scene();
@@ -256,6 +278,8 @@ export default function Goo(props) {
 
         const animate = () => {
             state.animationFrameId = requestAnimationFrame(animate);
+            if (!state.renderer || !state.physicsMaterial || !state.copyMaterial || !state.blurMaterial || !state.material) return;
+
             state.mouseVector.lerp(mousePosition.current, 0.1);
 
             state.renderer.setRenderTarget(state.physicsRenderTargetB);
@@ -277,9 +301,9 @@ export default function Goo(props) {
                 state.blurMaterial.uniforms.uDirection.value.set(0.0, 1.0);
                 state.renderer.render(state.blurScene, state.camera);
                 state.renderer.setRenderTarget(null);
-                material.uniforms.uPhysicsState.value = state.physicsRenderTargetA.texture;
-                material.uniforms.uSceneTexture.value = state.sceneRenderTarget.texture;
-                material.uniforms.uBlurredMap.value = state.blurRenderTargetDownsampledB.texture;
+                state.material.uniforms.uPhysicsState.value = state.physicsRenderTargetA.texture;
+                state.material.uniforms.uSceneTexture.value = state.sceneRenderTarget.texture;
+                state.material.uniforms.uBlurredMap.value = state.blurRenderTargetDownsampledB.texture;
                 state.renderer.render(state.scene, state.camera);
             } else {
                 state.renderer.setRenderTarget(null);
@@ -289,32 +313,33 @@ export default function Goo(props) {
         animate();
 
         return () => {
-            cancelAnimationFrame(state.animationFrameId);
-            state.renderer.dispose();
-            state.geometry.dispose();
-            material.dispose();
-            state.copyMaterial.uniforms.uTexture.value?.dispose();
-            state.copyMaterial.dispose();
-            state.physicsMaterial.dispose();
-            state.blurMaterial.dispose();
-            state.physicsRenderTargetA.dispose();
-            state.physicsRenderTargetB.dispose();
-            state.sceneRenderTarget.dispose();
-            state.blurRenderTargetDownsampledA.dispose();
-            state.blurRenderTargetDownsampledB.dispose();
+            if (state.animationFrameId) cancelAnimationFrame(state.animationFrameId);
+            state.renderer?.dispose();
+            state.geometry?.dispose();
+            state.material?.dispose();
+            state.copyMaterial?.uniforms.uTexture.value?.dispose();
+            state.copyMaterial?.dispose();
+            state.physicsMaterial?.dispose();
+            state.blurMaterial?.dispose();
+            state.physicsRenderTargetA?.dispose();
+            state.physicsRenderTargetB?.dispose();
+            state.sceneRenderTarget?.dispose();
+            state.blurRenderTargetDownsampledA?.dispose();
+            state.blurRenderTargetDownsampledB?.dispose();
         };
     }, []);
 
     // Effect for handling component resizes.
     useLayoutEffect(() => {
         const state = threeState.current;
-        if (state.renderer && width > 0 && height > 0) {
+        if (state.renderer && state.scene && state.copyMaterial && state.physicsMaterial && state.blurMaterial && width > 0 && height > 0) {
             state.renderer.setSize(width, height, false);
             const downsampledWidth = Math.round(width / DOWNSAMPLE_FACTOR);
             const downsampledHeight = Math.round(height / DOWNSAMPLE_FACTOR);
-            state.scene.children[0].material.uniforms.uResolution.value.set(width, height);
+            (state.scene.children[0] as THREE.Mesh<any, THREE.ShaderMaterial>).material.uniforms.uResolution.value.set(width, height);
             state.copyMaterial.uniforms.uResolution.value.set(width, height);
             state.physicsMaterial.uniforms.uResolution.value.set(width, height);
+            state.physicsMaterial.uniforms.uBrushSize.value = Math.min(width, height) * 0.15;
             state.blurMaterial.uniforms.uResolution.value.set(downsampledWidth, downsampledHeight);
             state.physicsRenderTargetA.setSize(width, height);
             state.physicsRenderTargetB.setSize(width, height);
@@ -326,7 +351,8 @@ export default function Goo(props) {
 
     // Effect for loading the texture from either an image URL or by capturing children.
     useEffect(() => {
-        if (!threeState.current.copyMaterial) return;
+        const { copyMaterial } = threeState.current;
+        if (!copyMaterial) return;
 
         let isCancelled = false;
         const textureLoader = new THREE.TextureLoader();
@@ -342,7 +368,7 @@ export default function Goo(props) {
                     }
                     const contentCanvas = await html2canvas(contentCaptureRef.current, { 
                         backgroundColor: null, useCORS: true, scale: window.devicePixelRatio,
-                        width: debouncedWidth, height: debouncedHeight,
+                        width: width, height: height,
                     });
                     if (isCancelled) return;
                     texture = new THREE.CanvasTexture(contentCanvas);
@@ -357,26 +383,25 @@ export default function Goo(props) {
                 }
 
                 if (isCancelled || !texture) {
-                    // Clear texture if no source is available
-                    if (threeState.current.copyMaterial.uniforms.uTexture.value) {
-                         threeState.current.copyMaterial.uniforms.uTexture.value = null;
+                    if (copyMaterial.uniforms.uTexture.value) {
+                        copyMaterial.uniforms.uTexture.value = null;
                     }
                     return;
                 }
 
-                if (threeState.current.copyMaterial.uniforms.uTexture.value) {
-                    threeState.current.copyMaterial.uniforms.uTexture.value.dispose();
+                if (copyMaterial.uniforms.uTexture.value) {
+                    copyMaterial.uniforms.uTexture.value.dispose();
                 }
 
                 texture.colorSpace = THREE.SRGBColorSpace;
                 const imageRes = new THREE.Vector2(texture.image.width, texture.image.height);
-                threeState.current.copyMaterial.uniforms.uTexture.value = texture;
-                threeState.current.copyMaterial.uniforms.uImageResolution.value.copy(imageRes);
+                copyMaterial.uniforms.uTexture.value = texture;
+                copyMaterial.uniforms.uImageResolution.value.copy(imageRes);
 
             } catch (error) {
                 console.error("Failed to load texture:", error);
-                if (threeState.current.copyMaterial.uniforms.uTexture.value) {
-                    threeState.current.copyMaterial.uniforms.uTexture.value = null;
+                if (copyMaterial.uniforms.uTexture.value) {
+                    copyMaterial.uniforms.uTexture.value = null;
                 }
             }
         };
@@ -389,25 +414,24 @@ export default function Goo(props) {
         };
     }, [imageUrl, useContentAsTexture, children, debouncedWidth, debouncedHeight]);
 
+    const contentCaptureStyle: CSSProperties = {
+        position: 'absolute',
+        top: 0,
+        left: 0,
+        transform: 'translateX(-101%)', // More robust off-screen positioning
+        width: width,
+        height: height,
+        pointerEvents: 'none',
+        visibility: useContentAsTexture ? 'visible' : 'hidden',
+    };
+
     return (
         <div style={{ width: "100%", height: "100%", overflow: "hidden", position: "relative" }}>
             <canvas
                 ref={canvasRef}
                 style={{ width: "100%", height: "100%", display: "block" }}
             />
-            <div
-                ref={contentCaptureRef}
-                style={{
-                    position: "absolute",
-                    top: 0,
-                    left: `-${width + 100}px`,
-                    width: width,
-                    height: height,
-                    pointerEvents: "none",
-                    visibility: useContentAsTexture ? 'visible' : 'hidden',
-                    zIndex: -1,
-                }}
-            >
+            <div ref={contentCaptureRef} style={contentCaptureStyle}>
                 {children}
             </div>
         </div>
@@ -419,28 +443,33 @@ Goo.defaultProps = {
     height: 675
 };
 
-framer.addPropertyControls(Goo, {
+// FIX: Removed `framer.` prefix and used direct import.
+addPropertyControls(Goo, {
     useContentAsTexture: {
-        type: framer.ControlType.Boolean,
+        // FIX: Removed `framer.` prefix.
+        type: ControlType.Boolean,
         title: "Source",
         defaultValue: false,
         enabledTitle: "Content",
         disabledTitle: "Image",
     },
     children: {
-        type: framer.ControlType.ComponentInstance,
+        // FIX: Removed `framer.` prefix.
+        type: ControlType.ComponentInstance,
         title: "Content",
         hidden: (props) => !props.useContentAsTexture,
     },
     imageUrl: {
-        type: framer.ControlType.Image,
+        // FIX: Removed `framer.` prefix.
+        type: ControlType.Image,
         title: "Image",
         defaultValue:
             "https://images.unsplash.com/photo-1470770841072-f978cf4d019e?q=80&w=2070&auto=format&fit=crop",
         hidden: (props) => props.useContentAsTexture,
     },
     refrostRate: {
-        type: framer.ControlType.Number,
+        // FIX: Removed `framer.` prefix.
+        type: ControlType.Number,
         title: "Refrost Rate",
         defaultValue: 0.0004,
         min: 0,
