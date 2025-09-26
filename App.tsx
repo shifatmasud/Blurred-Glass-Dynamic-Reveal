@@ -1,5 +1,5 @@
 import React, { useState } from 'react';
-import GlassEffect from './components/GlassEffect';
+import Clarity from './framer';
 
 const App: React.FC = () => {
   const [refrostRate, setRefrostRate] = useState(0.0004);
@@ -22,9 +22,10 @@ const App: React.FC = () => {
       </div>
 
       <div className="relative w-full max-w-4xl aspect-[16/9] shadow-2xl shadow-black/50 rounded-lg overflow-hidden animate-fade-in">
-        <GlassEffect 
+        <Clarity 
             imageUrl={mediaType === 'image' ? imageUrl : undefined}
             videoUrl={mediaType === 'video' ? videoUrl : undefined}
+            mediaType={mediaType}
             refrostRate={refrostRate} 
             brushSize={brushSize}
         />
