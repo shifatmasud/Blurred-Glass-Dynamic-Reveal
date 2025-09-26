@@ -1,4 +1,4 @@
-import React, { useRef, useEffect } from 'react';
+import React, { useRef, useEffect, useCallback } from 'react';
 import * as THREE from 'three';
 //@ts-ignore
 import { addPropertyControls, ControlType } from 'framer';
@@ -11,7 +11,46 @@ interface ClarityProps {
   brushSize: number;
   width: number;
   height: number;
+  refrostTrigger?: number;
 }
+
+// --- Hook for abstracting pointer events ---
+const usePointerEvents = (
+  canvasRef: React.RefObject<HTMLCanvasElement>,
+  onPointerUpdate: (x: number, y: number, isActive: boolean) => void
+) => {
+  useEffect(() => {
+    const canvas = canvasRef.current;
+    if (!canvas) return;
+
+    const updatePointerPosition = (clientX: number, clientY: number) => {
+        const rect = canvas.getBoundingClientRect();
+        const x = clientX - rect.left;
+        const y = rect.height - (clientY - rect.top);
+        onPointerUpdate(x, y, true);
+    };
+
+    const handleMouseMove = (event: MouseEvent) => updatePointerPosition(event.clientX, event.clientY);
+    const handleMouseLeave = () => onPointerUpdate(0, 0, false);
+    const handleTouchMove = (event: TouchEvent) => { if (event.touches.length > 0) updatePointerPosition(event.touches[0].clientX, event.touches[0].clientY); };
+    const handleTouchEnd = () => onPointerUpdate(0, 0, false);
+    
+    canvas.addEventListener('mousemove', handleMouseMove);
+    canvas.addEventListener('mouseleave', handleMouseLeave);
+    canvas.addEventListener('touchmove', handleTouchMove, { passive: true });
+    canvas.addEventListener('touchend', handleTouchEnd);
+    canvas.addEventListener('touchcancel', handleTouchEnd);
+
+    return () => {
+      canvas.removeEventListener('mousemove', handleMouseMove);
+      canvas.removeEventListener('mouseleave', handleMouseLeave);
+      canvas.removeEventListener('touchmove', handleTouchMove);
+      canvas.removeEventListener('touchend', handleTouchEnd);
+      canvas.removeEventListener('touchcancel', handleTouchEnd);
+    };
+  }, [canvasRef, onPointerUpdate]);
+};
+
 
 // --- Shaders ---
 const vertexShader = `
@@ -29,6 +68,7 @@ const physicsFragmentShader = `
   uniform float uBrushSize;
   uniform float uRefrostRate;
   uniform float uIsMouseActive;
+  uniform float uRefrostImpulse;
   varying vec2 vUv;
 
   void main() {
@@ -65,6 +105,9 @@ const physicsFragmentShader = `
 
     // 6. Frost slowly returns in non-wet, non-wiped areas
     clear -= uRefrostRate * (1.0 - water);
+
+    // 7. Manual refrost impulse
+    clear -= uRefrostImpulse * 0.1;
 
     clear = clamp(clear, 0.0, 1.0);
     water = clamp(water, 0.0, 1.0);
@@ -129,6 +172,8 @@ const fragmentShader = `
   uniform sampler2D uSceneTexture;
   uniform sampler2D uPhysicsState;
   uniform sampler2D uBlurredMap;
+  uniform vec2 uMouse;
+  uniform float uBrushSize;
   varying vec2 vUv;
 
   float rand(vec2 n) { 
@@ -140,15 +185,27 @@ const fragmentShader = `
     float clearFactor = physics.r;
     float waterFactor = physics.g;
     float dripFactor = physics.b;
+
     float disturbance = (waterFactor * 0.2 + dripFactor) * 0.5;
     vec2 distortion = vec2(dFdx(disturbance), dFdy(disturbance)) * -10.0;
+
     float revealFactor = smoothstep(0.0, 0.4, clearFactor);
     vec3 sceneColor = texture2D(uSceneTexture, vUv + distortion).rgb;
     vec3 blurredColor = texture2D(uBlurredMap, vUv + distortion).rgb;
+
     vec3 finalColor = mix(blurredColor, sceneColor, revealFactor);
+
+    // Add water highlights
     finalColor += pow(waterFactor, 2.0) * 0.15 + pow(dripFactor, 2.0) * 0.1;
+
+    // Add pointer sheen
+    float sheen = 1.0 - smoothstep(0.0, uBrushSize * 1.5, distance(gl_FragCoord.xy, uMouse));
+    finalColor += sheen * 0.05 * (waterFactor + dripFactor);
+
+    // Add noise to frosted areas
     float noise = (rand(vUv * 2.0) - 0.5) * 0.04;
     finalColor += noise * (1.0 - revealFactor);
+
     gl_FragColor = vec4(finalColor, 1.0);
   }
 `;
@@ -182,6 +239,7 @@ class ClarityController {
     private mousePosition = new THREE.Vector2(-1000, -1000);
     private smoothedMouse = new THREE.Vector2(-1000, -1000);
     private isMouseActive = false;
+    private refrostImpulse = 0.0;
 
     private mediaState = { type: '', src: '', loading: false };
     private objectURL: string | null = null;
@@ -201,7 +259,7 @@ class ClarityController {
         this.camera = new THREE.OrthographicCamera(-1, 1, 1, -1, 0, 1);
         const geometry = new THREE.PlaneGeometry(2, 2);
 
-        this.mainMaterial = new THREE.ShaderMaterial({ vertexShader, fragmentShader, uniforms: { uResolution: { value: new THREE.Vector2() }, uSceneTexture: { value: null }, uPhysicsState: { value: null }, uBlurredMap: { value: null } } });
+        this.mainMaterial = new THREE.ShaderMaterial({ vertexShader, fragmentShader, uniforms: { uResolution: { value: new THREE.Vector2() }, uSceneTexture: { value: null }, uPhysicsState: { value: null }, uBlurredMap: { value: null }, uMouse: { value: new THREE.Vector2() }, uBrushSize: { value: 120.0 } } });
         this.mainScene = new THREE.Scene();
         this.mainScene.add(new THREE.Mesh(geometry, this.mainMaterial));
 
@@ -209,7 +267,7 @@ class ClarityController {
         this.copyScene = new THREE.Scene();
         this.copyScene.add(new THREE.Mesh(geometry, this.copyMaterial));
         
-        this.physicsMaterial = new THREE.ShaderMaterial({ vertexShader, fragmentShader: physicsFragmentShader, uniforms: { uPreviousFrame: { value: null }, uResolution: { value: new THREE.Vector2() }, uMouse: { value: new THREE.Vector2() }, uBrushSize: { value: 120.0 }, uRefrostRate: { value: 0.0004 }, uIsMouseActive: { value: 0.0 } } });
+        this.physicsMaterial = new THREE.ShaderMaterial({ vertexShader, fragmentShader: physicsFragmentShader, uniforms: { uPreviousFrame: { value: null }, uResolution: { value: new THREE.Vector2() }, uMouse: { value: new THREE.Vector2() }, uBrushSize: { value: 120.0 }, uRefrostRate: { value: 0.0004 }, uIsMouseActive: { value: 0.0 }, uRefrostImpulse: { value: 0.0 } } });
         this.physicsScene = new THREE.Scene();
         this.physicsScene.add(new THREE.Mesh(geometry, this.physicsMaterial));
         
@@ -229,6 +287,7 @@ class ClarityController {
     }
     
     public setProps(newProps: Partial<ClarityProps>) { this.props = newProps; }
+    public triggerRefrost() { this.refrostImpulse = 1.0; }
     public updatePointer(x: number, y: number, isActive: boolean) {
         this.isMouseActive = isActive;
         if (isActive) { this.mousePosition.set(x, y); }
@@ -242,11 +301,13 @@ class ClarityController {
 
         const downsampledWidth = Math.round(w / ClarityController.DOWNSAMPLE_FACTOR);
         const downsampledHeight = Math.round(h / ClarityController.DOWNSAMPLE_FACTOR);
+        const brushPixelSize = Math.min(w, h) * (brushSize ?? 0.15);
         
         this.mainMaterial.uniforms.uResolution.value.set(w, h);
+        this.mainMaterial.uniforms.uBrushSize.value = brushPixelSize;
         this.copyMaterial.uniforms.uResolution.value.set(w, h);
         this.physicsMaterial.uniforms.uResolution.value.set(w, h);
-        this.physicsMaterial.uniforms.uBrushSize.value = Math.min(w, h) * (brushSize ?? 0.15);
+        this.physicsMaterial.uniforms.uBrushSize.value = brushPixelSize;
         this.blurMaterial.uniforms.uResolution.value.set(downsampledWidth, downsampledHeight);
         
         this.physicsRenderTargetA.setSize(w, h);
@@ -313,14 +374,19 @@ class ClarityController {
         }
 
         const sizeVec = this.renderer.getSize(new THREE.Vector2());
+        const brushPixelSize = Math.min(sizeVec.x, sizeVec.y) * (brushSize ?? 0.15);
         this.physicsMaterial.uniforms.uRefrostRate.value = refrostRate ?? 0.0004;
-        this.physicsMaterial.uniforms.uBrushSize.value = Math.min(sizeVec.x, sizeVec.y) * (brushSize ?? 0.15);
+        this.physicsMaterial.uniforms.uBrushSize.value = brushPixelSize;
+        this.mainMaterial.uniforms.uBrushSize.value = brushPixelSize;
+
         this.smoothedMouse.lerp(this.mousePosition, 0.1);
+        this.refrostImpulse = THREE.MathUtils.lerp(this.refrostImpulse, 0.0, 0.1);
         
         this.renderer.setRenderTarget(this.physicsRenderTargetB);
         this.physicsMaterial.uniforms.uPreviousFrame.value = this.physicsRenderTargetA.texture;
         this.physicsMaterial.uniforms.uMouse.value.copy(this.smoothedMouse);
         this.physicsMaterial.uniforms.uIsMouseActive.value = this.isMouseActive ? 1.0 : 0.0;
+        this.physicsMaterial.uniforms.uRefrostImpulse.value = this.refrostImpulse;
         this.renderer.render(this.physicsScene, this.camera);
         [this.physicsRenderTargetA, this.physicsRenderTargetB] = [this.physicsRenderTargetB, this.physicsRenderTargetA];
 
@@ -342,6 +408,7 @@ class ClarityController {
             this.mainMaterial.uniforms.uPhysicsState.value = this.physicsRenderTargetA.texture;
             this.mainMaterial.uniforms.uSceneTexture.value = this.sceneRenderTarget.texture;
             this.mainMaterial.uniforms.uBlurredMap.value = this.blurRenderTargetB.texture;
+            this.mainMaterial.uniforms.uMouse.value.copy(this.smoothedMouse);
             this.renderer.render(this.mainScene, this.camera);
         } else {
             this.renderer.setRenderTarget(null);
@@ -381,10 +448,11 @@ export default function Clarity(props: Partial<ClarityProps>) {
     const controller = new ClarityController(canvasRef.current, props);
     controllerRef.current = controller;
 
-    window.addEventListener('resize', controller.resize);
+    const handleResize = () => controller.resize();
+    window.addEventListener('resize', handleResize);
     
     return () => {
-      window.removeEventListener('resize', controller.resize);
+      window.removeEventListener('resize', handleResize);
       controller.dispose();
       controllerRef.current = null;
     };
@@ -394,38 +462,21 @@ export default function Clarity(props: Partial<ClarityProps>) {
     controllerRef.current?.setProps(props);
   }, [props]);
 
+  usePointerEvents(
+    canvasRef,
+    useCallback((x: number, y: number, isActive: boolean) => {
+      controllerRef.current?.updatePointer(x, y, isActive);
+    }, [])
+  );
+
   useEffect(() => {
-    const canvas = canvasRef.current;
-    if (!canvas) return;
+    // Check for a change in the trigger prop to avoid firing on initial render
+    if (props.refrostTrigger !== undefined && props.refrostTrigger > 0) {
+      controllerRef.current?.triggerRefrost();
+    }
+  }, [props.refrostTrigger]);
 
-    const updateMousePosition = (clientX: number, clientY: number) => {
-        const rect = canvas.getBoundingClientRect();
-        const x = clientX - rect.left;
-        const y = rect.height - (clientY - rect.top);
-        controllerRef.current?.updatePointer(x, y, true);
-    };
-
-    const handleMouseMove = (event: MouseEvent) => updateMousePosition(event.clientX, event.clientY);
-    const handleMouseLeave = () => controllerRef.current?.updatePointer(0, 0, false);
-    const handleTouchMove = (event: TouchEvent) => { if (event.touches.length > 0) updateMousePosition(event.touches[0].clientX, event.touches[0].clientY); };
-    const handleTouchEnd = () => controllerRef.current?.updatePointer(0, 0, false);
-    
-    canvas.addEventListener('mousemove', handleMouseMove);
-    canvas.addEventListener('mouseleave', handleMouseLeave);
-    canvas.addEventListener('touchmove', handleTouchMove, { passive: true });
-    canvas.addEventListener('touchend', handleTouchEnd);
-    canvas.addEventListener('touchcancel', handleTouchEnd);
-
-    return () => {
-      canvas.removeEventListener('mousemove', handleMouseMove);
-      canvas.removeEventListener('mouseleave', handleMouseLeave);
-      canvas.removeEventListener('touchmove', handleTouchMove);
-      canvas.removeEventListener('touchend', handleTouchEnd);
-      canvas.removeEventListener('touchcancel', handleTouchEnd);
-    };
-  }, []);
-
-  return <canvas ref={canvasRef} className="w-full h-full" style={{ display: 'block' }} />;
+  return <canvas ref={canvasRef} className="w-full h-full" style={{ display: 'block' }} aria-label="Interactive frosted glass pane" />;
 };
 
 //@ts-ignore
@@ -434,6 +485,7 @@ Clarity.defaultProps = {
     imageUrl: "https://images.unsplash.com/photo-1470770841072-f978cf4d019e?q=80&w=2070&auto=format&fit=crop",
     refrostRate: 0.0004,
     brushSize: 0.15,
+    refrostTrigger: 0,
 }
 
 addPropertyControls(Clarity, {

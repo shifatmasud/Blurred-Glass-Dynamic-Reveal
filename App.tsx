@@ -5,6 +5,7 @@ const App: React.FC = () => {
   const [refrostRate, setRefrostRate] = useState(0.0004);
   const [mediaType, setMediaType] = useState<'image' | 'video'>('image');
   const [brushSize, setBrushSize] = useState(0.15);
+  const [refrostTrigger, setRefrostTrigger] = useState(0);
 
   const imageUrl = "https://images.unsplash.com/photo-1470770841072-f978cf4d019e?q=80&w=2070&auto=format&fit=crop";
   const videoUrl = "https://storage.googleapis.com/gtv-videos-bucket/sample/BigBuckBunny.mp4";
@@ -28,6 +29,7 @@ const App: React.FC = () => {
             mediaType={mediaType}
             refrostRate={refrostRate} 
             brushSize={brushSize}
+            refrostTrigger={refrostTrigger}
         />
         <div className="absolute inset-0 border border-white/10 rounded-lg pointer-events-none"></div>
       </div>
@@ -91,6 +93,15 @@ const App: React.FC = () => {
                     Video
                 </button>
             </div>
+        </div>
+        <div className="mt-4 pt-4 border-t border-white/10">
+            <button
+                onClick={() => setRefrostTrigger(c => c + 1)}
+                className="w-full px-4 py-2 text-sm rounded-md transition-colors bg-white/10 text-white hover:bg-white/20 font-medium"
+                aria-label="Reset the frost on the glass pane"
+            >
+                Reset Frost
+            </button>
         </div>
       </div>
 
