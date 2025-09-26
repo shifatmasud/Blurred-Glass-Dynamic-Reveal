@@ -13,7 +13,7 @@ const App: React.FC = () => {
           Clarity
         </h1>
         <p className="text-lg md:text-xl text-gray-400 max-w-2xl mx-auto font-light" style={{textShadow: '0 2px 20px rgba(0,0,0,0.5)'}}>
-          Wipe away the blur.
+          A winter morning. Wipe the frost away and watch as condensation drips down the pane.
         </p>
       </div>
 

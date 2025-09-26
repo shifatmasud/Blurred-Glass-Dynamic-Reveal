@@ -16,7 +16,7 @@ const vertexShader = `
 `;
 
 const physicsFragmentShader = `
-  uniform sampler2D uPreviousFrame;
+  uniform sampler2D uPreviousFrame; // r: clear, g: water, b: drip
   uniform vec2 uResolution;
   uniform vec2 uMouse;
   uniform float uBrushSize;
@@ -26,20 +26,47 @@ const physicsFragmentShader = `
   varying vec2 vUv;
 
   void main() {
-    vec4 prevState = texture2D(uPreviousFrame, vUv);
+    vec4 state = texture2D(uPreviousFrame, vUv);
+    float clear = state.r;
+    float water = state.g;
+    float drip = state.b;
 
+    // 1. Wiping converts frost to water
     float brush = 0.0;
     if (uIsMouseActive > 0.5) {
       float dist = distance(gl_FragCoord.xy, uMouse);
       brush = 1.0 - smoothstep(0.0, uBrushSize, dist);
     }
-
-    float wipeAmount = max(prevState.r, brush);
     
-    wipeAmount -= uRefrostRate;
-    wipeAmount = clamp(wipeAmount, 0.0, 1.0);
+    float newClear = max(clear, brush);
+    float frostRemoved = max(0.0, (newClear - clear) * 0.5); // How much frost was cleared this frame
+    water += frostRemoved; // Add the removed frost as water
+    clear = newClear;
 
-    gl_FragColor = vec4(wipeAmount, 0.0, 0.0, 1.0);
+    // 2. Water coalesces and creates potential for drips
+    drip += water * 0.01; // Water contributes to the drip amount
+
+    // 3. Gravity pulls drips down (Advection)
+    // Sample from the pixel directly above to see if it was dripping
+    vec2 dripOffset = vec2(0.0, 1.0 / uResolution.y) * 2.0; // Move down 2 pixels
+    float incomingDrip = texture2D(uPreviousFrame, vUv - dripOffset).b;
+    drip = incomingDrip * 0.985; // Drips are advected downwards and slowly fade
+
+    // 4. Drips clear a path in the frost
+    clear = max(clear, drip * 0.9);
+    
+    // 5. Water evaporates/dries
+    water *= 0.97;
+
+    // 6. Frost slowly returns in non-wet, non-wiped areas
+    clear -= uRefrostRate * (1.0 - water); // Frost returns slower on wet areas
+
+    // Clamp all values
+    clear = clamp(clear, 0.0, 1.0);
+    water = clamp(water, 0.0, 1.0);
+    drip = clamp(drip, 0.0, 1.0);
+
+    gl_FragColor = vec4(clear, water, drip, 1.0);
   }
 `;
 
@@ -109,21 +136,36 @@ const blurFragmentShader = `
 const fragmentShader = `
   uniform vec2 uResolution;
   uniform sampler2D uSceneTexture; // The sharp, aspect-corrected scene
-  uniform sampler2D uWipeMap;
+  uniform sampler2D uPhysicsState; // r: clear, g: water, b: drip
   uniform sampler2D uBlurredMap; // The final blurred scene
 
   varying vec2 vUv;
 
   void main() {
-    float wipeFactor = texture2D(uWipeMap, vUv).r;
-    float revealFactor = smoothstep(0.0, 0.4, wipeFactor);
+    vec4 physics = texture2D(uPhysicsState, vUv);
+    float clearFactor = physics.r;
+    float waterFactor = physics.g;
+    float dripFactor = physics.b;
 
-    vec3 sceneColor = texture2D(uSceneTexture, vUv).rgb;
-    // The uBlurredMap is now a lower-resolution texture. The hardware's linear filtering
-    // during this texture lookup provides a smooth upsampling.
-    vec3 blurredColor = texture2D(uBlurredMap, vUv).rgb;
+    // Create a disturbance map for refraction based on water and drips
+    float disturbance = (waterFactor * 0.2 + dripFactor) * 0.5;
     
+    // Use screen-space derivatives to get the gradient of the disturbance,
+    // which simulates the edges of water refracting light.
+    vec2 distortion = vec2(dFdx(disturbance), dFdy(disturbance)) * -10.0;
+
+    // Smoothly reveal the sharp image based on how much has been cleared
+    float revealFactor = smoothstep(0.0, 0.4, clearFactor);
+
+    // Sample the background textures with the distortion offset
+    vec3 sceneColor = texture2D(uSceneTexture, vUv + distortion).rgb;
+    vec3 blurredColor = texture2D(uBlurredMap, vUv + distortion).rgb;
+    
+    // Mix between blurred and sharp based on the reveal factor
     vec3 finalColor = mix(blurredColor, sceneColor, revealFactor);
+
+    // Add a subtle specular highlight to the water to make it look wet
+    finalColor += pow(waterFactor, 2.0) * 0.15 + pow(dripFactor, 2.0) * 0.1;
 
     gl_FragColor = vec4(finalColor, 1.0);
   }
@@ -167,9 +209,9 @@ const GlassEffect: React.FC<GlassEffectProps> = ({ imageUrl, refrostRate }) => {
     return () => {
       window.removeEventListener('mousemove', handleMouseMove);
       document.body.removeEventListener('mouseleave', handleMouseLeave);
-      window.removeEventListener('touchmove', handleTouchMove);
-      window.removeEventListener('touchend', handleTouchEnd);
-      window.removeEventListener('touchcancel', handleTouchEnd);
+      window.addEventListener('touchmove', handleTouchMove);
+      window.addEventListener('touchend', handleTouchEnd);
+      window.addEventListener('touchcancel', handleTouchEnd);
     };
   }, []);
 
@@ -197,7 +239,7 @@ const GlassEffect: React.FC<GlassEffectProps> = ({ imageUrl, refrostRate }) => {
       uniforms: {
         uResolution: { value: new THREE.Vector2() },
         uSceneTexture: { value: null },
-        uWipeMap: { value: null },
+        uPhysicsState: { value: null },
         uBlurredMap: { value: null },
       },
     });
@@ -317,7 +359,7 @@ const GlassEffect: React.FC<GlassEffectProps> = ({ imageUrl, refrostRate }) => {
 
         // Final Render pass: Composite everything
         renderer.setRenderTarget(null);
-        material.uniforms.uWipeMap.value = physicsRenderTargetA.texture;
+        material.uniforms.uPhysicsState.value = physicsRenderTargetA.texture;
         material.uniforms.uSceneTexture.value = sceneRenderTarget.texture;
         material.uniforms.uBlurredMap.value = blurRenderTargetDownsampledB.texture;
         renderer.render(scene, camera);
