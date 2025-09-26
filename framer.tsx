@@ -243,6 +243,7 @@ class ClarityController {
 
     private mediaState = { type: '', src: '', loading: false };
     private videoElement: HTMLVideoElement | null = null;
+    private objectURLs = new Set<string>();
     
     private isCancelled = false;
     private animationFrameId: number | null = null;
@@ -334,12 +335,19 @@ class ClarityController {
             this.copyMaterial.uniforms.uTexture.value.dispose();
             this.copyMaterial.uniforms.uTexture.value = null;
         }
+        this.objectURLs.forEach(url => URL.revokeObjectURL(url));
+        this.objectURLs.clear();
     }
     
     private async _loadImageTexture(imageUrl: string): Promise<{ texture: THREE.Texture, resolution: THREE.Vector2 }> {
+        const response = await fetch(imageUrl);
+        if (!response.ok) throw new Error(`Failed to fetch image: ${response.statusText}`);
+        const blob = await response.blob();
+        const objectURL = URL.createObjectURL(blob);
+        this.objectURLs.add(objectURL);
+
         const loader = new THREE.TextureLoader();
-        loader.setCrossOrigin('anonymous');
-        const texture = await loader.loadAsync(imageUrl);
+        const texture = await loader.loadAsync(objectURL);
 
         if (this.isCancelled) {
             texture.dispose();
@@ -351,6 +359,12 @@ class ClarityController {
     }
     
     private async _loadVideoTexture(videoUrl: string): Promise<{ texture: THREE.VideoTexture, resolution: THREE.Vector2 }> {
+        const response = await fetch(videoUrl);
+        if (!response.ok) throw new Error(`Failed to fetch video: ${response.statusText}`);
+        const blob = await response.blob();
+        const objectURL = URL.createObjectURL(blob);
+        this.objectURLs.add(objectURL);
+
         return new Promise((resolve, reject) => {
             const video = document.createElement('video');
             this.videoElement = video;
@@ -386,8 +400,7 @@ class ClarityController {
             video.addEventListener('canplay', onCanPlay);
             video.addEventListener('error', onError);
 
-            video.src = videoUrl;
-            video.crossOrigin = 'anonymous';
+            video.src = objectURL;
             video.muted = true;
             video.loop = true;
             video.playsInline = true;
