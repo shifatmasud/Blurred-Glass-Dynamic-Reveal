@@ -316,51 +316,129 @@ class ClarityController {
         this.blurRenderTargetA.setSize(downsampledWidth, downsampledHeight);
         this.blurRenderTargetB.setSize(downsampledWidth, downsampledHeight);
     }
+    
+    private _cleanupPreviousMedia() {
+        if (this.objectURL) {
+            URL.revokeObjectURL(this.objectURL);
+            this.objectURL = null;
+        }
+        if (this.videoElement) {
+            this.videoElement.pause();
+            this.videoElement.removeAttribute('src');
+            this.videoElement.load();
+            this.videoElement = null;
+        }
+        if (this.copyMaterial.uniforms.uTexture.value) {
+            this.copyMaterial.uniforms.uTexture.value.dispose();
+            this.copyMaterial.uniforms.uTexture.value = null;
+        }
+    }
+    
+    private async _loadImageTexture(imageUrl: string): Promise<{ texture: THREE.Texture, resolution: THREE.Vector2 }> {
+        const response = await fetch(imageUrl);
+        if (!response.ok) throw new Error(`Failed to fetch image: ${response.statusText}`);
+        if (this.isCancelled) throw new Error('Component unmounted during fetch');
+
+        const blob = await response.blob();
+        this.objectURL = URL.createObjectURL(blob);
+        if (this.isCancelled) throw new Error('Component unmounted during blob creation');
+
+        const texture = await new THREE.TextureLoader().loadAsync(this.objectURL);
+        if (this.isCancelled) {
+            texture.dispose();
+            throw new Error('Component unmounted during texture load');
+        }
+        
+        const resolution = new THREE.Vector2(texture.image.width, texture.image.height);
+        return { texture, resolution };
+    }
+    
+    private async _loadVideoTexture(videoUrl: string): Promise<{ texture: THREE.VideoTexture, resolution: THREE.Vector2 }> {
+        return new Promise((resolve, reject) => {
+            const video = document.createElement('video');
+            this.videoElement = video;
+
+            const cleanup = () => {
+                video.removeEventListener('canplay', onCanPlay);
+                video.removeEventListener('error', onError);
+            };
+
+            const onCanPlay = () => {
+                video.play()
+                    .then(() => {
+                        if (this.isCancelled) {
+                            reject(new Error('Component unmounted'));
+                            return;
+                        }
+                        const texture = new THREE.VideoTexture(video);
+                        const resolution = new THREE.Vector2(video.videoWidth, video.videoHeight);
+                        cleanup();
+                        resolve({ texture, resolution });
+                    })
+                    .catch(err => {
+                        cleanup();
+                        reject(err);
+                    });
+            };
+
+            const onError = (e: Event | string) => {
+                cleanup();
+                reject(new Error(`Failed to load video. Error: ${e.toString()}`));
+            };
+
+            video.addEventListener('canplay', onCanPlay);
+            video.addEventListener('error', onError);
+
+            video.src = videoUrl;
+            video.crossOrigin = 'anonymous';
+            video.muted = true;
+            video.loop = true;
+            video.playsInline = true;
+            video.load();
+        });
+    }
 
     private async _loadMedia() {
         const { mediaType, imageUrl, videoUrl } = this.props;
         const type = mediaType ?? 'image';
         const src = type === 'image' ? imageUrl : videoUrl;
         
-        if (!src) return;
-        this.mediaState = { loading: true, type, src };
+        if (!src || this.mediaState.loading) return;
 
-        if (this.objectURL) URL.revokeObjectURL(this.objectURL); this.objectURL = null;
-        if (this.videoElement) { this.videoElement.pause(); this.videoElement.removeAttribute('src'); this.videoElement = null; }
-        this.copyMaterial.uniforms.uTexture.value?.dispose();
-        this.copyMaterial.uniforms.uTexture.value = null;
+        this.mediaState = { loading: true, type, src };
+        this._cleanupPreviousMedia();
 
         try {
-            let texture: THREE.Texture;
-            let mediaResolution: THREE.Vector2;
+            let result: { texture: THREE.Texture, resolution: THREE.Vector2 };
+
             if (type === 'image' && imageUrl) {
-                const response = await fetch(imageUrl);
-                if (!response.ok || this.isCancelled) return;
-                const blob = await response.blob();
-                this.objectURL = URL.createObjectURL(blob);
-                if (this.isCancelled) return;
-                texture = await new THREE.TextureLoader().loadAsync(this.objectURL);
-                mediaResolution = new THREE.Vector2(texture.image.width, texture.image.height);
+                result = await this._loadImageTexture(imageUrl);
             } else if (type === 'video' && videoUrl) {
-                const result = await new Promise<{texture: THREE.VideoTexture, resolution: THREE.Vector2}>((resolve, reject) => {
-                  this.videoElement = document.createElement('video');
-                  this.videoElement.src = videoUrl;
-                  this.videoElement.crossOrigin = 'anonymous'; this.videoElement.muted = true; this.videoElement.loop = true; this.videoElement.playsInline = true;
-                  const onCanPlay = () => this.videoElement!.play().then(() => { if (!this.isCancelled) resolve({texture: new THREE.VideoTexture(this.videoElement!), resolution: new THREE.Vector2(this.videoElement!.videoWidth, this.videoElement!.videoHeight)}); }).catch(reject);
-                  this.videoElement.addEventListener('canplay', onCanPlay);
-                  this.videoElement.addEventListener('error', () => reject(new Error('Failed to load video.')));
-                  this.videoElement.load();
-                });
-                texture = result.texture;
-                mediaResolution = result.resolution;
-            } else { return; }
-            if (this.isCancelled) return;
-            texture!.colorSpace = THREE.SRGBColorSpace;
-            this.copyMaterial.uniforms.uTexture.value = texture!;
-            this.copyMaterial.uniforms.uImageResolution.value.copy(mediaResolution!);
+                result = await this._loadVideoTexture(videoUrl);
+            } else {
+                throw new Error("No valid media source provided.");
+            }
+            
+            if (this.isCancelled) {
+                 result.texture.dispose();
+                 return;
+            }
+
+            result.texture.colorSpace = THREE.SRGBColorSpace;
+            this.copyMaterial.uniforms.uTexture.value = result.texture;
+            this.copyMaterial.uniforms.uImageResolution.value.copy(result.resolution);
+            
             this.resize();
-        } catch (error) { console.error('Failed to load media:', error); }
-        finally { this.mediaState.loading = false; }
+        } catch (error) {
+            if (!this.isCancelled) {
+                console.error('Failed to load media:', error);
+            }
+            this._cleanupPreviousMedia();
+        } finally {
+            if (!this.isCancelled) {
+                this.mediaState.loading = false;
+            }
+        }
     }
 
     private _animate = () => {
@@ -421,8 +499,9 @@ class ClarityController {
     public dispose() {
         this.isCancelled = true;
         if (this.animationFrameId) cancelAnimationFrame(this.animationFrameId);
-        if (this.objectURL) URL.revokeObjectURL(this.objectURL);
-        if (this.videoElement) { this.videoElement.pause(); this.videoElement.removeAttribute('src'); }
+        
+        this._cleanupPreviousMedia();
+
         this.renderer.dispose();
         this.mainScene.traverse(obj => { if (obj instanceof THREE.Mesh) obj.geometry.dispose(); });
         this.mainMaterial.dispose();
