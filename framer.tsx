@@ -1,4 +1,4 @@
-import React, { useRef, useEffect, useCallback } from 'react';
+import React, { useRef, useEffect, useCallback, useState } from 'react';
 import * as THREE from 'three';
 //@ts-ignore
 import { addPropertyControls, ControlType } from 'framer';
@@ -12,6 +12,7 @@ interface ClarityProps {
   width: number;
   height: number;
   refrostTrigger?: number;
+  onError?: (message: string | null) => void; // Internal: for reporting errors to the React component
 }
 
 // --- Hook for abstracting pointer events ---
@@ -293,21 +294,29 @@ class ClarityController {
         if (isActive) { this.mousePosition.set(x, y); }
     }
     public resize = () => {
-        const { width, height, brushSize } = this.props;
-        const w = width ?? this.canvas.parentElement?.clientWidth ?? window.innerWidth;
-        const h = height ?? this.canvas.parentElement?.clientHeight ?? window.innerHeight;
+        const { brushSize, width: propWidth, height: propHeight } = this.props;
+        const parent = this.canvas.parentElement;
+        const w = propWidth ?? parent?.clientWidth ?? 0;
+        const h = propHeight ?? parent?.clientHeight ?? 0;
 
-        if (w === 0 || h === 0) {
+        if (w <= 0 || h <= 0) {
+            if (this.isReady) {
+                console.log('Clarity: Canvas size is zero, pausing render.');
+            }
             this.isReady = false;
             return;
+        }
+
+        if (!this.isReady) {
+            console.log(`Clarity: Canvas resized to ${w}x${h}, starting render.`);
         }
         this.isReady = true;
 
         this.renderer.setSize(w, h, false);
         this.camera.updateProjectionMatrix();
 
-        const downsampledWidth = Math.round(w / ClarityController.DOWNSAMPLE_FACTOR);
-        const downsampledHeight = Math.round(h / ClarityController.DOWNSAMPLE_FACTOR);
+        const downsampledWidth = Math.max(1, Math.round(w / ClarityController.DOWNSAMPLE_FACTOR));
+        const downsampledHeight = Math.max(1, Math.round(h / ClarityController.DOWNSAMPLE_FACTOR));
         const brushPixelSize = Math.min(w, h) * (brushSize ?? 0.15);
         
         this.mainMaterial.uniforms.uResolution.value.set(w, h);
@@ -442,8 +451,21 @@ class ClarityController {
             
             this.resize();
         } catch (error) {
+            let errorMessage = "An unknown error occurred while loading media.";
+            if (error instanceof Error) {
+                if (error.message.includes("Failed to fetch")) {
+                    errorMessage = `Network Error: Could not fetch media. This is often a CORS policy issue on the server hosting the media. Please ensure the asset is publicly accessible. URL: ${src}`;
+                } else {
+                    errorMessage = error.message;
+                }
+            } else {
+                errorMessage = String(error);
+            }
+            
+            console.error(`Clarity Component Error: ${errorMessage}`);
+            
             if (!this.isCancelled) {
-                console.error('Failed to load media:', error);
+                this.props.onError?.(errorMessage);
             }
             this._cleanupPreviousMedia();
         } finally {
@@ -527,48 +549,42 @@ class ClarityController {
 export default function Clarity(props: Partial<ClarityProps>) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const controllerRef = useRef<ClarityController | null>(null);
+  const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
-    if (!canvasRef.current) return;
+    const canvas = canvasRef.current;
+    if (!canvas) return;
+
+    const parent = canvas.parentElement;
+    if (!parent) return;
     
-    const controller = new ClarityController(canvasRef.current, props);
+    const controller = new ClarityController(canvas, { ...props, onError: setError });
     controllerRef.current = controller;
 
-    let resizeTimeout: number;
-    const handleResize = () => {
-      clearTimeout(resizeTimeout);
-      resizeTimeout = window.setTimeout(() => {
+    const resizeObserver = new ResizeObserver(() => {
         controller.resize();
-      }, 150);
-    };
+    });
+    resizeObserver.observe(parent);
     
-    window.addEventListener('resize', handleResize);
-    
-    // Initial resize after component mounts
     controller.resize();
     
     return () => {
-      window.removeEventListener('resize', handleResize);
-      clearTimeout(resizeTimeout);
+      resizeObserver.disconnect();
       controller.dispose();
       controllerRef.current = null;
     };
   }, []);
 
   useEffect(() => {
-    controllerRef.current?.setProps(props);
+    const controller = controllerRef.current;
+    if (!controller) return;
 
-    // Debounce resize on prop changes (e.g. from Framer)
-    // This handles width, height, and brushSize changes efficiently.
-    const timeoutId = setTimeout(() => {
-        controllerRef.current?.resize();
-    }, 150);
-
-    return () => clearTimeout(timeoutId);
+    controller.setProps({ ...props, onError: setError });
+    controller.resize();
   }, [props]);
 
   useEffect(() => {
-    // This effect handles loading media when the source props change.
+    setError(null);
     controllerRef.current?.loadMedia();
   }, [props.mediaType, props.imageUrl, props.videoUrl]);
 
@@ -580,13 +596,32 @@ export default function Clarity(props: Partial<ClarityProps>) {
   );
 
   useEffect(() => {
-    // Check for a change in the trigger prop to avoid firing on initial render
     if (props.refrostTrigger !== undefined && props.refrostTrigger > 0) {
       controllerRef.current?.triggerRefrost();
     }
   }, [props.refrostTrigger]);
 
-  return <canvas ref={canvasRef} className="w-full h-full" style={{ display: 'block' }} aria-label="Interactive frosted glass pane" />;
+  return (
+    <div className="w-full h-full relative bg-black/20">
+      <canvas 
+        ref={canvasRef} 
+        className="w-full h-full" 
+        style={{ display: 'block', opacity: error ? 0.2 : 1, transition: 'opacity 0.3s' }} 
+        aria-label="Interactive frosted glass pane" 
+       />
+      {error && (
+        <div 
+          className="absolute inset-0 flex flex-col items-center justify-center bg-transparent text-white p-6 text-center"
+          role="alert"
+        >
+          <div className="max-w-md p-4 rounded-lg bg-black/50 backdrop-blur-sm border border-red-500/50">
+            <h3 className="font-bold text-md mb-2 text-red-400">Component Error</h3>
+            <p className="text-sm text-gray-300">{error}</p>
+          </div>
+        </div>
+      )}
+    </div>
+  );
 };
 
 //@ts-ignore
