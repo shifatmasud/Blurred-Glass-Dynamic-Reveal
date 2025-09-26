@@ -281,7 +281,6 @@ class ClarityController {
         this.blurRenderTargetA = new THREE.WebGLRenderTarget(1, 1, renderTargetOptions);
         this.blurRenderTargetB = new THREE.WebGLRenderTarget(1, 1, renderTargetOptions);
         
-        this.resize();
         this.start();
     }
     
@@ -295,6 +294,11 @@ class ClarityController {
         const { width, height, brushSize } = this.props;
         const w = width ?? this.canvas.parentElement?.clientWidth ?? window.innerWidth;
         const h = height ?? this.canvas.parentElement?.clientHeight ?? window.innerHeight;
+
+        if (w === 0 || h === 0) {
+            return;
+        }
+
         this.renderer.setSize(w, h, false);
         this.camera.updateProjectionMatrix();
 
@@ -442,6 +446,10 @@ class ClarityController {
         }
 
         const sizeVec = this.renderer.getSize(new THREE.Vector2());
+        if (sizeVec.x === 0 || sizeVec.y === 0) {
+            return;
+        }
+        
         const brushPixelSize = Math.min(sizeVec.x, sizeVec.y) * (brushSize ?? 0.15);
         this.physicsMaterial.uniforms.uRefrostRate.value = refrostRate ?? 0.0004;
         this.physicsMaterial.uniforms.uBrushSize.value = brushPixelSize;
@@ -517,10 +525,16 @@ export default function Clarity(props: Partial<ClarityProps>) {
     const controller = new ClarityController(canvasRef.current, props);
     controllerRef.current = controller;
 
+    // Defer the initial resize to the next frame to ensure layout is calculated.
+    const initialResizeId = requestAnimationFrame(() => {
+        controller.resize();
+    });
+
     const handleResize = () => controller.resize();
     window.addEventListener('resize', handleResize);
     
     return () => {
+      cancelAnimationFrame(initialResizeId);
       window.removeEventListener('resize', handleResize);
       controller.dispose();
       controllerRef.current = null;
