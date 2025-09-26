@@ -444,12 +444,6 @@ class ClarityController {
             return;
         }
 
-        const currentSize = this.renderer.getSize(new THREE.Vector2());
-        if (currentSize.x !== parent.clientWidth || currentSize.y !== parent.clientHeight) {
-            this.resize();
-            return; 
-        }
-
         const { mediaType, imageUrl, videoUrl, refrostRate, brushSize } = this.props;
         const currentSrc = mediaType === 'image' ? imageUrl : videoUrl;
         if (!this.mediaState.loading && (this.mediaState.type !== mediaType || this.mediaState.src !== currentSrc)) {
@@ -531,11 +525,22 @@ export default function Clarity(props: Partial<ClarityProps>) {
     const controller = new ClarityController(canvasRef.current, props);
     controllerRef.current = controller;
 
-    const handleResize = () => controller.resize();
+    let resizeTimeout: number;
+    const handleResize = () => {
+      clearTimeout(resizeTimeout);
+      resizeTimeout = window.setTimeout(() => {
+        controller.resize();
+      }, 150);
+    };
+    
     window.addEventListener('resize', handleResize);
+    
+    // Initial resize after component mounts
+    controller.resize();
     
     return () => {
       window.removeEventListener('resize', handleResize);
+      clearTimeout(resizeTimeout);
       controller.dispose();
       controllerRef.current = null;
     };
