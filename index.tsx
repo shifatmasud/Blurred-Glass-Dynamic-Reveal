@@ -1,6 +1,7 @@
 import React from 'react';
 import ReactDOM from 'react-dom/client';
-import App from './App';
+// Fix: Import the main App component instead of the Clarity component directly.
+import Clarity from './framer.tsx';
 
 const rootElement = document.getElementById('root');
 if (!rootElement) {
@@ -10,6 +11,7 @@ if (!rootElement) {
 const root = ReactDOM.createRoot(rootElement);
 root.render(
   <React.StrictMode>
-    <App />
+    {/* Fix: Render the App component as the root of the application. */}
+    <Clarity />
   </React.StrictMode>
 );

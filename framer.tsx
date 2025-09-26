@@ -9,10 +9,8 @@ interface ClarityProps {
   videoUrl?: string;
   refrostRate: number;
   brushSize: number;
-  width: number;
-  height: number;
-  refrostTrigger?: number;
-  onError?: (message: string | null) => void; // Internal: for reporting errors to the React component
+  width?: number;
+  height?: number;
 }
 
 // --- Hook for abstracting pointer events ---
@@ -47,7 +45,6 @@ const usePointerEvents = (
       canvas.removeEventListener('mouseleave', handleMouseLeave);
       canvas.removeEventListener('touchmove', handleTouchMove);
       canvas.removeEventListener('touchend', handleTouchEnd);
-      canvas.removeEventListener('touchcancel', handleTouchEnd);
     };
   }, [canvasRef, onPointerUpdate]);
 };
@@ -69,8 +66,14 @@ const physicsFragmentShader = `
   uniform float uBrushSize;
   uniform float uRefrostRate;
   uniform float uIsMouseActive;
-  uniform float uRefrostImpulse;
   varying vec2 vUv;
+
+  #define DRIP_RETENTION 0.985
+  #define WATER_EVAPORATION 0.97
+  #define WATER_TO_DRIP_CONVERSION 0.01
+  #define DRIP_CLEAR_FACTOR 0.9
+  #define DRIP_OFFSET_PIXELS 2.0
+  #define FROST_TO_WATER_CONVERSION 0.5
 
   void main() {
     vec4 state = texture2D(uPreviousFrame, vUv);
@@ -86,29 +89,26 @@ const physicsFragmentShader = `
     }
     
     float newClear = max(clear, brush);
-    float frostRemoved = max(0.0, (newClear - clear) * 0.5); // How much frost was cleared this frame
+    float frostRemoved = max(0.0, (newClear - clear) * FROST_TO_WATER_CONVERSION); // How much frost was cleared this frame
     water += frostRemoved; // Add the removed frost as water
     clear = newClear;
 
     // 2. Water coalesces and creates potential for drips
-    drip += water * 0.01; // Water contributes to the drip amount
+    drip += water * WATER_TO_DRIP_CONVERSION; // Water contributes to the drip amount
 
     // 3. Gravity pulls drips down (Advection)
-    vec2 dripOffset = vec2(0.0, 1.0 / uResolution.y) * 2.0; // Move down 2 pixels
+    vec2 dripOffset = vec2(0.0, 1.0 / uResolution.y) * DRIP_OFFSET_PIXELS;
     float incomingDrip = texture2D(uPreviousFrame, vUv - dripOffset).b;
-    drip = incomingDrip * 0.985;
+    drip = incomingDrip * DRIP_RETENTION;
 
     // 4. Drips clear a path in the frost
-    clear = max(clear, drip * 0.9);
+    clear = max(clear, drip * DRIP_CLEAR_FACTOR);
     
     // 5. Water evaporates/dries
-    water *= 0.97;
+    water *= WATER_EVAPORATION;
 
     // 6. Frost slowly returns in non-wet, non-wiped areas
     clear -= uRefrostRate * (1.0 - water);
-
-    // 7. Manual refrost impulse
-    clear -= uRefrostImpulse * 0.1;
 
     clear = clamp(clear, 0.0, 1.0);
     water = clamp(water, 0.0, 1.0);
@@ -213,10 +213,7 @@ const fragmentShader = `
 
 class ClarityController {
     private canvas: HTMLCanvasElement;
-    private props: Partial<ClarityProps>;
-
     private renderer: THREE.WebGLRenderer;
-    private clock: THREE.Clock;
     private camera: THREE.OrthographicCamera;
     
     private mainScene: THREE.Scene;
@@ -240,7 +237,6 @@ class ClarityController {
     private mousePosition = new THREE.Vector2(-1000, -1000);
     private smoothedMouse = new THREE.Vector2(-1000, -1000);
     private isMouseActive = false;
-    private refrostImpulse = 0.0;
 
     private mediaState = { type: '', src: '', loading: false };
     private videoElement: HTMLVideoElement | null = null;
@@ -250,14 +246,17 @@ class ClarityController {
     private animationFrameId: number | null = null;
     private static DOWNSAMPLE_FACTOR = 2;
     private isReady = false;
+    private loadMediaRequestId = 0;
+    
+    private currentBrushSize = 0.15;
+    private onError: (message: string | null) => void;
 
-    constructor(canvas: HTMLCanvasElement, initialProps: Partial<ClarityProps>) {
+    constructor(canvas: HTMLCanvasElement, onError: (message: string | null) => void) {
         this.canvas = canvas;
-        this.props = initialProps;
+        this.onError = onError;
         this.renderer = new THREE.WebGLRenderer({ canvas, antialias: true, alpha: true });
         this.renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
         
-        this.clock = new THREE.Clock();
         this.camera = new THREE.OrthographicCamera(-1, 1, 1, -1, 0, 1);
         const geometry = new THREE.PlaneGeometry(2, 2);
 
@@ -269,7 +268,7 @@ class ClarityController {
         this.copyScene = new THREE.Scene();
         this.copyScene.add(new THREE.Mesh(geometry, this.copyMaterial));
         
-        this.physicsMaterial = new THREE.ShaderMaterial({ vertexShader, fragmentShader: physicsFragmentShader, uniforms: { uPreviousFrame: { value: null }, uResolution: { value: new THREE.Vector2() }, uMouse: { value: new THREE.Vector2() }, uBrushSize: { value: 120.0 }, uRefrostRate: { value: 0.0004 }, uIsMouseActive: { value: 0.0 }, uRefrostImpulse: { value: 0.0 } } });
+        this.physicsMaterial = new THREE.ShaderMaterial({ vertexShader, fragmentShader: physicsFragmentShader, uniforms: { uPreviousFrame: { value: null }, uResolution: { value: new THREE.Vector2() }, uMouse: { value: new THREE.Vector2() }, uBrushSize: { value: 120.0 }, uRefrostRate: { value: 0.0004 }, uIsMouseActive: { value: 0.0 } } });
         this.physicsScene = new THREE.Scene();
         this.physicsScene.add(new THREE.Mesh(geometry, this.physicsMaterial));
         
@@ -287,48 +286,46 @@ class ClarityController {
         this.start();
     }
     
-    public setProps(newProps: Partial<ClarityProps>) { this.props = newProps; }
-    public triggerRefrost() { this.refrostImpulse = 1.0; }
+    public setRefrostRate(rate: number) { this.physicsMaterial.uniforms.uRefrostRate.value = rate; }
     public updatePointer(x: number, y: number, isActive: boolean) {
         this.isMouseActive = isActive;
         if (isActive) { this.mousePosition.set(x, y); }
     }
-    public resize = () => {
-        const { brushSize, width: propWidth, height: propHeight } = this.props;
-        const parent = this.canvas.parentElement;
-        const w = propWidth ?? parent?.clientWidth ?? 0;
-        const h = propHeight ?? parent?.clientHeight ?? 0;
-
-        if (w <= 0 || h <= 0) {
-            if (this.isReady) {
-                console.log('Clarity: Canvas size is zero, pausing render.');
-            }
+    public updateBrushSize(brushSize: number) {
+        this.currentBrushSize = brushSize;
+        if (!this.isReady) return;
+        const size = new THREE.Vector2();
+        this.renderer.getSize(size);
+        const brushPixelSize = Math.min(size.x, size.y) * brushSize;
+        this.mainMaterial.uniforms.uBrushSize.value = brushPixelSize;
+        this.physicsMaterial.uniforms.uBrushSize.value = brushPixelSize;
+    }
+    public resize = (width: number, height: number) => {
+        if (width <= 0 || height <= 0) {
+            if (this.isReady) console.log('Clarity: Canvas size is zero, pausing render.');
             this.isReady = false;
             return;
         }
 
-        if (!this.isReady) {
-            console.log(`Clarity: Canvas resized to ${w}x${h}, starting render.`);
-        }
+        if (!this.isReady) console.log(`Clarity: Canvas resized to ${width}x${height}, starting render.`);
         this.isReady = true;
 
-        this.renderer.setSize(w, h, false);
+        this.renderer.setSize(width, height, false);
         this.camera.updateProjectionMatrix();
 
-        const downsampledWidth = Math.max(1, Math.round(w / ClarityController.DOWNSAMPLE_FACTOR));
-        const downsampledHeight = Math.max(1, Math.round(h / ClarityController.DOWNSAMPLE_FACTOR));
-        const brushPixelSize = Math.min(w, h) * (brushSize ?? 0.15);
+        const downsampledWidth = Math.max(1, Math.round(width / ClarityController.DOWNSAMPLE_FACTOR));
+        const downsampledHeight = Math.max(1, Math.round(height / ClarityController.DOWNSAMPLE_FACTOR));
         
-        this.mainMaterial.uniforms.uResolution.value.set(w, h);
-        this.mainMaterial.uniforms.uBrushSize.value = brushPixelSize;
-        this.copyMaterial.uniforms.uResolution.value.set(w, h);
-        this.physicsMaterial.uniforms.uResolution.value.set(w, h);
-        this.physicsMaterial.uniforms.uBrushSize.value = brushPixelSize;
+        this.updateBrushSize(this.currentBrushSize);
+        
+        this.mainMaterial.uniforms.uResolution.value.set(width, height);
+        this.copyMaterial.uniforms.uResolution.value.set(width, height);
+        this.physicsMaterial.uniforms.uResolution.value.set(width, height);
         this.blurMaterial.uniforms.uResolution.value.set(downsampledWidth, downsampledHeight);
         
-        this.physicsRenderTargetA.setSize(w, h);
-        this.physicsRenderTargetB.setSize(w, h);
-        this.sceneRenderTarget.setSize(w, h);
+        this.physicsRenderTargetA.setSize(width, height);
+        this.physicsRenderTargetB.setSize(width, height);
+        this.sceneRenderTarget.setSize(width, height);
         this.blurRenderTargetA.setSize(downsampledWidth, downsampledHeight);
         this.blurRenderTargetB.setSize(downsampledWidth, downsampledHeight);
     }
@@ -417,16 +414,18 @@ class ClarityController {
         });
     }
 
-    public async loadMedia() {
-        const { mediaType, imageUrl, videoUrl } = this.props;
-        const type = mediaType ?? 'image';
+    public async loadMedia(mediaType: 'image' | 'video', imageUrl?: string, videoUrl?: string) {
+        const type = mediaType;
         const src = type === 'image' ? imageUrl : videoUrl;
         
-        if (!src || this.mediaState.loading || (this.mediaState.type === type && this.mediaState.src === src)) {
+        if (!src || (this.mediaState.type === type && this.mediaState.src === src)) {
             return;
         }
 
+        this.loadMediaRequestId++;
+        const currentRequestId = this.loadMediaRequestId;
         this.mediaState = { loading: true, type, src };
+        this.onError(null);
         this._cleanupPreviousMedia();
 
         try {
@@ -440,8 +439,9 @@ class ClarityController {
                 throw new Error("No valid media source provided.");
             }
             
-            if (this.isCancelled) {
+            if (this.isCancelled || currentRequestId !== this.loadMediaRequestId) {
                  result.texture.dispose();
+                 console.log("Clarity: Stale media load request ignored.");
                  return;
             }
 
@@ -449,8 +449,16 @@ class ClarityController {
             this.copyMaterial.uniforms.uTexture.value = result.texture;
             this.copyMaterial.uniforms.uImageResolution.value.copy(result.resolution);
             
-            this.resize();
+            // A resize is needed to recalculate cover UVs for the new media
+            const size = new THREE.Vector2();
+            this.renderer.getSize(size);
+            this.resize(size.x, size.y);
+
         } catch (error) {
+            if (this.isCancelled || currentRequestId !== this.loadMediaRequestId) {
+                console.log("Clarity: Stale media load request failed, ignoring error.");
+                return;
+            }
             let errorMessage = "An unknown error occurred while loading media.";
             if (error instanceof Error) {
                 if (error.message.includes("Failed to fetch")) {
@@ -463,13 +471,10 @@ class ClarityController {
             }
             
             console.error(`Clarity Component Error: ${errorMessage}`);
-            
-            if (!this.isCancelled) {
-                this.props.onError?.(errorMessage);
-            }
+            this.onError(errorMessage);
             this._cleanupPreviousMedia();
         } finally {
-            if (!this.isCancelled) {
+            if (!this.isCancelled && currentRequestId === this.loadMediaRequestId) {
                 this.mediaState.loading = false;
             }
         }
@@ -479,21 +484,14 @@ class ClarityController {
         if (this.isCancelled) return;
         this.animationFrameId = requestAnimationFrame(this._animate);
 
-        if (!this.isReady) {
-            return;
-        }
-
-        const { refrostRate } = this.props;
-        this.physicsMaterial.uniforms.uRefrostRate.value = refrostRate ?? 0.0004;
+        if (!this.isReady) return;
 
         this.smoothedMouse.lerp(this.mousePosition, 0.1);
-        this.refrostImpulse = THREE.MathUtils.lerp(this.refrostImpulse, 0.0, 0.1);
         
         this.renderer.setRenderTarget(this.physicsRenderTargetB);
         this.physicsMaterial.uniforms.uPreviousFrame.value = this.physicsRenderTargetA.texture;
         this.physicsMaterial.uniforms.uMouse.value.copy(this.smoothedMouse);
         this.physicsMaterial.uniforms.uIsMouseActive.value = this.isMouseActive ? 1.0 : 0.0;
-        this.physicsMaterial.uniforms.uRefrostImpulse.value = this.refrostImpulse;
         this.renderer.render(this.physicsScene, this.camera);
         [this.physicsRenderTargetA, this.physicsRenderTargetB] = [this.physicsRenderTargetB, this.physicsRenderTargetA];
 
@@ -545,11 +543,14 @@ class ClarityController {
     }
 }
 
-
-export default function Clarity(props: Partial<ClarityProps>) {
+export default function Clarity(props: ClarityProps) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const controllerRef = useRef<ClarityController | null>(null);
   const [error, setError] = useState<string | null>(null);
+
+  const handleError = useCallback((message: string | null) => {
+    setError(message);
+  }, []);
 
   useEffect(() => {
     const canvas = canvasRef.current;
@@ -558,48 +559,44 @@ export default function Clarity(props: Partial<ClarityProps>) {
     const parent = canvas.parentElement;
     if (!parent) return;
     
-    const controller = new ClarityController(canvas, { ...props, onError: setError });
+    const controller = new ClarityController(canvas, handleError);
     controllerRef.current = controller;
 
-    const resizeObserver = new ResizeObserver(() => {
-        controller.resize();
+    const resizeObserver = new ResizeObserver((entries) => {
+        if (!entries || entries.length === 0) return;
+        const entry = entries[0];
+        const width = props.width ?? entry.contentRect.width;
+        const height = props.height ?? entry.contentRect.height;
+        controller.resize(width, height);
     });
     resizeObserver.observe(parent);
     
-    controller.resize();
+    controller.resize(props.width ?? parent.clientWidth, props.height ?? parent.clientHeight);
     
     return () => {
       resizeObserver.disconnect();
       controller.dispose();
       controllerRef.current = null;
     };
-  }, []);
+  }, [props.width, props.height, handleError]);
 
   useEffect(() => {
-    const controller = controllerRef.current;
-    if (!controller) return;
-
-    controller.setProps({ ...props, onError: setError });
-    controller.resize();
-  }, [props]);
+    controllerRef.current?.setRefrostRate(props.refrostRate);
+  }, [props.refrostRate]);
 
   useEffect(() => {
-    setError(null);
-    controllerRef.current?.loadMedia();
+    controllerRef.current?.updateBrushSize(props.brushSize);
+  }, [props.brushSize]);
+
+  useEffect(() => {
+    controllerRef.current?.loadMedia(props.mediaType, props.imageUrl, props.videoUrl);
   }, [props.mediaType, props.imageUrl, props.videoUrl]);
 
-  usePointerEvents(
-    canvasRef,
-    useCallback((x: number, y: number, isActive: boolean) => {
-      controllerRef.current?.updatePointer(x, y, isActive);
-    }, [])
-  );
+  const onPointerUpdate = useCallback((x: number, y: number, isActive: boolean) => {
+    controllerRef.current?.updatePointer(x, y, isActive);
+  }, []);
 
-  useEffect(() => {
-    if (props.refrostTrigger !== undefined && props.refrostTrigger > 0) {
-      controllerRef.current?.triggerRefrost();
-    }
-  }, [props.refrostTrigger]);
+  usePointerEvents(canvasRef, onPointerUpdate);
 
   return (
     <div className="w-full h-full relative bg-black/20">
@@ -630,13 +627,12 @@ Clarity.defaultProps = {
     imageUrl: "https://images.unsplash.com/photo-1470770841072-f978cf4d019e?q=80&w=2070&auto=format&fit=crop",
     refrostRate: 0.0004,
     brushSize: 0.15,
-    refrostTrigger: 0,
 } 
 
 addPropertyControls(Clarity, {
     mediaType: { type: ControlType.Enum, title: "Media", options: ['image', 'video'], defaultValue: 'image' },
-    imageUrl: { type: ControlType.Image, title: "Image", hidden: (props) => props.mediaType !== 'image' },
-    videoUrl: { type: ControlType.File, title: "Video", allowedFileTypes: ['mp4', 'webm', 'mov'], hidden: (props) => props.mediaType !== 'video' },
+    imageUrl: { type: ControlType.Image, title: "Image", hidden: (props: ClarityProps) => props.mediaType !== 'image' },
+    videoUrl: { type: ControlType.File, title: "Video", allowedFileTypes: ['mp4', 'webm', 'mov'], hidden: (props: ClarityProps) => props.mediaType !== 'video' },
     refrostRate: { type: ControlType.Number, title: "Refrost Rate", min: 0, max: 0.005, step: 0.0001, defaultValue: 0.0004, displayStepper: true },
     brushSize: { type: ControlType.Number, title: "Pointer Size", min: 0.05, max: 0.5, step: 0.01, defaultValue: 0.15, displayStepper: true },
 });
