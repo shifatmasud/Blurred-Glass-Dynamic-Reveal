@@ -1,5 +1,5 @@
 {
-  "name": "Blurred Glass Dynamic Reveal",
+  "name": "Clarity: Blurred Glass Dynamic Reveal",
   "description": "An interactive, hyper-realistic WebGL experience simulating a frosted window pane. Users can wipe away condensation and watch water droplets react to their touch, revealing the underlying image.",
   "requestFramePermissions": []
 }
