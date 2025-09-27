@@ -1,4 +1,7 @@
+
 import React, { useState, useEffect, useCallback, useRef } from "react"
+// Fix: Suppress TypeScript error for Framer-specific imports.
+// @ts-ignore
 import { addPropertyControls, ControlType } from "framer"
 import * as THREE from "three"
 

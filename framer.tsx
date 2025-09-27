@@ -1,7 +1,3 @@
-
-
-
-
 import React, { useRef, useEffect, useCallback, useState, RefObject } from 'react';
 import * as THREE from 'three';
 //@ts-ignore
@@ -213,21 +209,27 @@ class ClarityController {
     private isReady = false;
     private loadMediaRequestId = 0;
     
-    private currentBrushSize = 0.30;
+    private targetProps = { refrostRate: 0.0030, brushSize: 0.30 };
+    private animatedProps = { refrostRate: 0.0030, brushSize: 0.30 };
+    
     private onError: (message: string | null) => void;
     
     private static MAX_TEXTURE_SIZE = 2048;
 
-    constructor(canvas: HTMLCanvasElement, onError: (message: string | null) => void) {
+    constructor(canvas: HTMLCanvasElement, onError: (message: string | null) => void, initialProps: ClarityProps) {
         this.canvas = canvas;
         this.onError = onError;
+        
+        this.targetProps.refrostRate = initialProps.refrostRate;
+        this.targetProps.brushSize = initialProps.brushSize;
+        this.animatedProps = { ...this.targetProps };
+
         this.renderer = new THREE.WebGLRenderer({
             canvas,
             antialias: false,
             alpha: true,
             powerPreference: 'low-power',
         });
-        this.renderer.setPixelRatio(Math.min(window.devicePixelRatio, 1.5));
         
         this.camera = new THREE.OrthographicCamera(-1, 1, 1, -1, 0, 1);
         this.planeGeometry = new THREE.PlaneGeometry(2, 2);
@@ -240,7 +242,7 @@ class ClarityController {
         this.copyScene = new THREE.Scene();
         this.copyScene.add(new THREE.Mesh(this.planeGeometry, this.copyMaterial));
         
-        this.physicsMaterial = new THREE.ShaderMaterial({ vertexShader, fragmentShader: physicsFragmentShader, uniforms: { uPreviousFrame: { value: null }, uResolution: { value: new THREE.Vector2() }, uMouse: { value: new THREE.Vector2() }, uBrushSize: { value: 120.0 }, uRefrostRate: { value: 0.0030 }, uIsMouseActive: { value: 0.0 } } });
+        this.physicsMaterial = new THREE.ShaderMaterial({ vertexShader, fragmentShader: physicsFragmentShader, uniforms: { uPreviousFrame: { value: null }, uResolution: { value: new THREE.Vector2() }, uMouse: { value: new THREE.Vector2() }, uBrushSize: { value: 120.0 }, uRefrostRate: { value: this.animatedProps.refrostRate }, uIsMouseActive: { value: 0.0 } } });
         this.physicsScene = new THREE.Scene();
         this.physicsScene.add(new THREE.Mesh(this.planeGeometry, this.physicsMaterial));
         
@@ -258,21 +260,26 @@ class ClarityController {
         this.start();
     }
     
-    public setRefrostRate(rate: number) { this.physicsMaterial.uniforms.uRefrostRate.value = rate; }
+    public updateProps(props: { refrostRate: number, brushSize: number }) {
+        this.targetProps.refrostRate = props.refrostRate;
+        this.targetProps.brushSize = props.brushSize;
+    }
+    
     public updatePointer(x: number, y: number, isActive: boolean) {
         this.isMouseActive = isActive;
         if (isActive) { this.mousePosition.set(x, y); }
     }
-    public updateBrushSize(brushSize: number) {
-        this.currentBrushSize = brushSize;
+    
+    private _updateBrushUniforms() {
         if (!this.isReady) return;
         const size = new THREE.Vector2();
         this.renderer.getSize(size);
-        const brushPixelSize = Math.min(size.x, size.y) * brushSize;
+        const brushPixelSize = Math.min(size.x, size.y) * this.animatedProps.brushSize;
         this.mainMaterial.uniforms.uBrushSize.value = brushPixelSize;
         this.physicsMaterial.uniforms.uBrushSize.value = brushPixelSize / ClarityController.PHYSICS_DOWNSAMPLE_FACTOR;
     }
-    public resize = (width: number, height: number) => {
+
+    public resize = (width: number, height: number, pixelRatio: number) => {
         if (width <= 0 || height <= 0) {
             if (this.isReady) console.log('Clarity: Canvas size is zero, pausing render.');
             this.isReady = false;
@@ -282,6 +289,7 @@ class ClarityController {
         if (!this.isReady) console.log(`Clarity: Canvas resized to ${width}x${height}, starting render.`);
         this.isReady = true;
 
+        this.renderer.setPixelRatio(Math.min(window.devicePixelRatio, pixelRatio));
         this.renderer.setSize(width, height, false);
         this.camera.updateProjectionMatrix();
 
@@ -291,7 +299,7 @@ class ClarityController {
         const physicsWidth = Math.max(1, Math.round(width / ClarityController.PHYSICS_DOWNSAMPLE_FACTOR));
         const physicsHeight = Math.max(1, Math.round(height / ClarityController.PHYSICS_DOWNSAMPLE_FACTOR));
 
-        this.updateBrushSize(this.currentBrushSize);
+        this._updateBrushUniforms();
         
         this.mainMaterial.uniforms.uResolution.value.set(width, height);
         this.copyMaterial.uniforms.uResolution.value.set(width, height);
@@ -450,7 +458,10 @@ class ClarityController {
             // A resize is needed to recalculate cover UVs for the new media
             const size = new THREE.Vector2();
             this.renderer.getSize(size);
-            this.resize(size.x, size.y);
+            const currentProps = (this.canvas as any).__props;
+            if (currentProps) {
+               this.resize(size.x, size.y, currentProps.pixelRatio);
+            }
 
         } catch (error) {
             if (this.isCancelled || currentRequestId !== this.loadMediaRequestId) {
@@ -479,6 +490,13 @@ class ClarityController {
         this.animationFrameId = requestAnimationFrame(this._animate);
 
         if (!this.isReady) return;
+
+        const lerpFactor = 0.075;
+        this.animatedProps.refrostRate = THREE.MathUtils.lerp(this.animatedProps.refrostRate, this.targetProps.refrostRate, lerpFactor);
+        this.animatedProps.brushSize = THREE.MathUtils.lerp(this.animatedProps.brushSize, this.targetProps.brushSize, lerpFactor);
+        
+        this.physicsMaterial.uniforms.uRefrostRate.value = this.animatedProps.refrostRate;
+        this._updateBrushUniforms();
 
         this.smoothedMouse.lerp(this.mousePosition, 0.1);
         
@@ -590,15 +608,18 @@ export interface ClarityProps {
   videoUrl?: string;
   refrostRate: number;
   brushSize: number;
+  pixelRatio: number;
   width?: number;
   height?: number;
 }
 
 /**
- * @framerSupportedLayoutWidth auto
- * @framerSupportedLayoutHeight auto
+ * @framerSupportedLayoutWidth any-prefer-fixed
+ * @framerSupportedLayoutHeight any-prefer-fixed
+ * @framerIntrinsicWidth 600
+ * @framerIntrinsicHeight 400
  */
-function Clarity(props: ClarityProps) {
+export function Clarity(props: ClarityProps) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const controllerRef = useRef<ClarityController | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -606,6 +627,10 @@ function Clarity(props: ClarityProps) {
   const propsRef = useRef(props);
   useEffect(() => {
     propsRef.current = props;
+    if(canvasRef.current) {
+        // A bit of a hack to pass props to the controller for the resize after media load
+        (canvasRef.current as any).__props = props;
+    }
   });
   
   const handleError = useCallback((message: string | null) => {
@@ -623,7 +648,7 @@ function Clarity(props: ClarityProps) {
     const width = currentProps.width ?? parent.clientWidth;
     const height = currentProps.height ?? parent.clientHeight;
     
-    controller.resize(width, height);
+    controller.resize(width, height, currentProps.pixelRatio);
   }, []);
 
   useEffect(() => {
@@ -631,7 +656,7 @@ function Clarity(props: ClarityProps) {
     if (!canvas || !canvas.parentElement) return;
     
     const parent = canvas.parentElement;
-    const controller = new ClarityController(canvas, handleError);
+    const controller = new ClarityController(canvas, handleError, propsRef.current);
     controllerRef.current = controller;
 
     const resizeObserver = new ResizeObserver(handleResize);
@@ -648,15 +673,14 @@ function Clarity(props: ClarityProps) {
 
   useEffect(() => {
     handleResize();
-  }, [props.width, props.height, handleResize]);
+  }, [props.width, props.height, props.pixelRatio, handleResize]);
 
   useEffect(() => {
-    controllerRef.current?.setRefrostRate(props.refrostRate);
-  }, [props.refrostRate]);
-
-  useEffect(() => {
-    controllerRef.current?.updateBrushSize(props.brushSize);
-  }, [props.brushSize]);
+    controllerRef.current?.updateProps({
+      refrostRate: props.refrostRate,
+      brushSize: props.brushSize,
+    });
+  }, [props.refrostRate, props.brushSize]);
 
   useEffect(() => {
     controllerRef.current?.loadMedia(props.mediaType, props.imageUrl, props.videoUrl);
@@ -696,6 +720,7 @@ Clarity.defaultProps = {
     imageUrl: "https://images.unsplash.com/photo-1470770841072-f978cf4d019e?q=80&w=2070&auto=format&fit=crop",
     refrostRate: 0.0030,
     brushSize: 0.30,
+    pixelRatio: 1.5,
 };
 
 addPropertyControls(Clarity, {
@@ -704,64 +729,5 @@ addPropertyControls(Clarity, {
     videoUrl: { type: ControlType.File, title: "Video", allowedFileTypes: ['mp4', 'webm', 'mov'], hidden: (props: ClarityProps) => props.mediaType !== 'video' },
     refrostRate: { type: ControlType.Number, title: "Refrost Rate", min: 0, max: 0.005, step: 0.0001, defaultValue: 0.0030, displayStepper: true },
     brushSize: { type: ControlType.Number, title: "Pointer Size", min: 0.05, max: 0.5, step: 0.01, defaultValue: 0.30, displayStepper: true },
+    pixelRatio: { type: ControlType.Number, title: "Pixel Ratio", min: 0.5, max: 2, step: 0.1, defaultValue: 1.5, displayStepper: true },
 });
-
-export default Clarity;
-
-// --- Standalone App Wrapper with UI Controls ---
-export function ClarityApp() {
-    const [brushSize, setBrushSize] = useState(0.30);
-    const [refrostRate, setRefrostRate] = useState(0.0030);
-
-    return (
-        <div className="w-screen h-screen text-white flex flex-col items-center justify-center overflow-hidden">
-            <div className="absolute top-4 left-4 sm:top-6 sm:left-6 p-4 z-10 w-[calc(100%-2rem)] max-w-sm animate-fade-in-up">
-                <div className="p-4 bg-black/40 backdrop-blur-lg rounded-xl border border-white/10 shadow-2xl space-y-4">
-                    <h1 className="text-xl font-medium text-center">Clarity Controls</h1>
-                    <div className="space-y-2">
-                        <div className="flex justify-between items-center">
-                          <label htmlFor="brushSize" className="text-sm font-medium text-gray-300">Pointer Size</label>
-                          <span className="text-sm text-gray-400 font-mono bg-white/10 px-2 py-1 rounded">{brushSize.toFixed(2)}</span>
-                        </div>
-                        <input
-                            id="brushSize"
-                            type="range"
-                            min="0.05"
-                            max="0.5"
-                            step="0.01"
-                            value={brushSize}
-                            onChange={(e) => setBrushSize(parseFloat(e.target.value))}
-                            className="w-full custom-slider"
-                            aria-label="Pointer Size"
-                        />
-                    </div>
-                    <div className="space-y-2">
-                        <div className="flex justify-between items-center">
-                          <label htmlFor="refrostRate" className="text-sm font-medium text-gray-300">Refrost Rate</label>
-                           <span className="text-sm text-gray-400 font-mono bg-white/10 px-2 py-1 rounded">{refrostRate.toFixed(4)}</span>
-                        </div>
-                        <input
-                            id="refrostRate"
-                            type="range"
-                            min="0"
-                            max="0.005"
-                            step="0.0001"
-                            value={refrostRate}
-                            onChange={(e) => setRefrostRate(parseFloat(e.target.value))}
-                            className="w-full custom-slider"
-                            aria-label="Refrost Rate"
-                        />
-                    </div>
-                </div>
-            </div>
-            <div className="w-full h-full animate-fade-in absolute inset-0">
-                <Clarity
-                    mediaType="image"
-                    imageUrl="https://images.unsplash.com/photo-1470770841072-f978cf4d019e?q=80&w=2070&auto=format&fit=crop"
-                    brushSize={brushSize}
-                    refrostRate={refrostRate}
-                />
-            </div>
-        </div>
-    );
-}
