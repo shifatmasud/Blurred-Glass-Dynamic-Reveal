@@ -233,6 +233,8 @@ class ClarityController {
     private blurScene: THREE.Scene;
     private blurMaterial: THREE.ShaderMaterial;
 
+    private planeGeometry: THREE.PlaneGeometry;
+
     private physicsRenderTargetA: THREE.WebGLRenderTarget;
     private physicsRenderTargetB: THREE.WebGLRenderTarget;
     private sceneRenderTarget: THREE.WebGLRenderTarget;
@@ -263,23 +265,23 @@ class ClarityController {
         this.renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
         
         this.camera = new THREE.OrthographicCamera(-1, 1, 1, -1, 0, 1);
-        const geometry = new THREE.PlaneGeometry(2, 2);
+        this.planeGeometry = new THREE.PlaneGeometry(2, 2);
 
         this.mainMaterial = new THREE.ShaderMaterial({ vertexShader, fragmentShader, uniforms: { uResolution: { value: new THREE.Vector2() }, uSceneTexture: { value: null }, uPhysicsState: { value: null }, uBlurredMap: { value: null }, uMouse: { value: new THREE.Vector2() }, uBrushSize: { value: 120.0 } } });
         this.mainScene = new THREE.Scene();
-        this.mainScene.add(new THREE.Mesh(geometry, this.mainMaterial));
+        this.mainScene.add(new THREE.Mesh(this.planeGeometry, this.mainMaterial));
 
         this.copyMaterial = new THREE.ShaderMaterial({ vertexShader, fragmentShader: copyFragmentShader, uniforms: { uTexture: { value: null }, uResolution: { value: new THREE.Vector2() }, uImageResolution: { value: new THREE.Vector2() } } });
         this.copyScene = new THREE.Scene();
-        this.copyScene.add(new THREE.Mesh(geometry, this.copyMaterial));
+        this.copyScene.add(new THREE.Mesh(this.planeGeometry, this.copyMaterial));
         
         this.physicsMaterial = new THREE.ShaderMaterial({ vertexShader, fragmentShader: physicsFragmentShader, uniforms: { uPreviousFrame: { value: null }, uResolution: { value: new THREE.Vector2() }, uMouse: { value: new THREE.Vector2() }, uBrushSize: { value: 120.0 }, uRefrostRate: { value: 0.0004 }, uIsMouseActive: { value: 0.0 } } });
         this.physicsScene = new THREE.Scene();
-        this.physicsScene.add(new THREE.Mesh(geometry, this.physicsMaterial));
+        this.physicsScene.add(new THREE.Mesh(this.planeGeometry, this.physicsMaterial));
         
         this.blurMaterial = new THREE.ShaderMaterial({ vertexShader, fragmentShader: blurFragmentShader, uniforms: { uInput: { value: null }, uResolution: { value: new THREE.Vector2() }, uDirection: { value: new THREE.Vector2() } } });
         this.blurScene = new THREE.Scene();
-        this.blurScene.add(new THREE.Mesh(geometry, this.blurMaterial));
+        this.blurScene.add(new THREE.Mesh(this.planeGeometry, this.blurMaterial));
 
         const renderTargetOptions = { minFilter: THREE.LinearFilter, magFilter: THREE.LinearFilter, format: THREE.RGBAFormat, type: THREE.UnsignedByteType, stencilBuffer: false };
         this.physicsRenderTargetA = new THREE.WebGLRenderTarget(1, 1, renderTargetOptions);
@@ -535,9 +537,9 @@ class ClarityController {
         if (this.animationFrameId) cancelAnimationFrame(this.animationFrameId);
         
         this._cleanupPreviousMedia();
-
-        this.renderer.dispose();
-        this.mainScene.traverse(obj => { if (obj instanceof THREE.Mesh) obj.geometry.dispose(); });
+    
+        // Dispose all THREE.js objects to free up GPU memory
+        this.planeGeometry.dispose();
         this.mainMaterial.dispose();
         this.copyMaterial.dispose();
         this.physicsMaterial.dispose();
@@ -547,6 +549,13 @@ class ClarityController {
         this.sceneRenderTarget.dispose();
         this.blurRenderTargetA.dispose();
         this.blurRenderTargetB.dispose();
+    
+        // Forcefully release the WebGL context.
+        // This is crucial in development environments (like React with StrictMode)
+        // where components can be mounted/unmounted rapidly, to prevent hitting
+        // the browser's limit for active WebGL contexts.
+        this.renderer.forceContextLoss();
+        this.renderer.dispose();
     }
 }
 
