@@ -1,3 +1,13 @@
+
+
+
+
+
+
+
+
+
+
 import React, { useRef, useEffect, useCallback, useState, RefObject } from 'react';
 import * as THREE from 'three';
 //@ts-ignore
@@ -133,6 +143,8 @@ const fragmentShader = `
   uniform sampler2D uBlurredMap;
   uniform vec2 uMouse;
   uniform float uBrushSize;
+  uniform float uChromaticAberration;
+  uniform float uReflectivity;
   varying vec2 vUv;
 
   float rand(vec2 n) { 
@@ -145,23 +157,38 @@ const fragmentShader = `
     float waterFactor = physics.g;
     float dripFactor = physics.b;
 
+    // 1. Calculate distortion from water/drips
     float disturbance = (waterFactor * 0.2 + dripFactor) * 0.5;
     vec2 distortion = vec2(dFdx(disturbance), dFdy(disturbance)) * -10.0;
+    
+    // 2. Add chromatic aberration (RGB shift)
+    float shift = uChromaticAberration * disturbance;
+    vec2 uv = vUv + distortion;
+    
+    float sceneR = texture2D(uSceneTexture, uv + vec2(shift, 0.0)).r;
+    float sceneG = texture2D(uSceneTexture, uv).g;
+    float sceneB = texture2D(uSceneTexture, uv - vec2(shift, 0.0)).b;
+    vec3 sceneColor = vec3(sceneR, sceneG, sceneB);
+    
+    float blurredR = texture2D(uBlurredMap, uv + vec2(shift, 0.0)).r;
+    float blurredG = texture2D(uBlurredMap, uv).g;
+    float blurredB = texture2D(uBlurredMap, uv - vec2(shift, 0.0)).b;
+    vec3 blurredColor = vec3(blurredR, blurredG, blurredB);
 
+    // 3. Mix blurred and clear scenes
     float revealFactor = smoothstep(0.0, 0.4, clearFactor);
-    vec3 sceneColor = texture2D(uSceneTexture, vUv + distortion).rgb;
-    vec3 blurredColor = texture2D(uBlurredMap, vUv + distortion).rgb;
-
     vec3 finalColor = mix(blurredColor, sceneColor, revealFactor);
 
-    // Add water highlights
-    finalColor += pow(waterFactor, 2.0) * 0.15 + pow(dripFactor, 2.0) * 0.1;
+    // 4. Add dynamic reflections and highlights
+    float shimmer = rand(vUv * 10.0 + distortion * 5.0); // Use distortion to create shimmer
+    float highlight = pow(waterFactor + dripFactor, 2.0) * (0.5 + shimmer * 0.5); // Add shimmer to the highlight
+    finalColor += highlight * uReflectivity;
 
     // Add pointer sheen
     float sheen = 1.0 - smoothstep(0.0, uBrushSize * 1.5, distance(gl_FragCoord.xy, uMouse));
     finalColor += sheen * 0.05 * (waterFactor + dripFactor);
 
-    // Add noise to frosted areas
+    // 5. Add noise to frosted areas
     float noise = (rand(vUv * 2.0) - 0.5) * 0.04;
     finalColor += noise * (1.0 - revealFactor);
 
@@ -214,7 +241,7 @@ class ClarityController {
     
     private onError: (message: string | null) => void;
     
-    private static MAX_TEXTURE_SIZE = 2048;
+    private static MAX_TEXTURE_SIZE = 480;
 
     constructor(canvas: HTMLCanvasElement, onError: (message: string | null) => void, initialProps: ClarityProps) {
         this.canvas = canvas;
@@ -234,7 +261,28 @@ class ClarityController {
         this.camera = new THREE.OrthographicCamera(-1, 1, 1, -1, 0, 1);
         this.planeGeometry = new THREE.PlaneGeometry(2, 2);
 
-        this.mainMaterial = new THREE.ShaderMaterial({ vertexShader, fragmentShader, uniforms: { uResolution: { value: new THREE.Vector2() }, uSceneTexture: { value: null }, uPhysicsState: { value: null }, uBlurredMap: { value: null }, uMouse: { value: new THREE.Vector2() }, uBrushSize: { value: 120.0 } } });
+        this.mainMaterial = new THREE.ShaderMaterial({ 
+            vertexShader, 
+            fragmentShader, 
+            uniforms: { 
+                uResolution: { value: new THREE.Vector2() }, 
+                uSceneTexture: { value: null }, 
+                uPhysicsState: { value: null }, 
+                uBlurredMap: { value: null }, 
+                uMouse: { value: new THREE.Vector2() }, 
+                uBrushSize: { value: 120.0 },
+                uChromaticAberration: { value: initialProps.chromaticAberration },
+                uReflectivity: { value: initialProps.reflectivity },
+            },
+            // FIX: Suppress a TypeScript error for the 'derivatives' extension. The type
+            // definitions for Three.js may be out of sync with the runtime version,
+            // as this property is required to enable standard derivatives for `dFdx/dFdy` in the shader.
+            // Using @ts-expect-error as a safer alternative to @ts-ignore.
+            extensions: {
+                // @ts-expect-error
+                derivatives: true
+            }
+        });
         this.mainScene = new THREE.Scene();
         this.mainScene.add(new THREE.Mesh(this.planeGeometry, this.mainMaterial));
 
@@ -260,9 +308,16 @@ class ClarityController {
         this.start();
     }
     
-    public updateProps(props: { refrostRate: number, brushSize: number }) {
+    public updateAnimatedProps(props: { refrostRate: number, brushSize: number }) {
         this.targetProps.refrostRate = props.refrostRate;
         this.targetProps.brushSize = props.brushSize;
+    }
+
+    public updateVisuals(props: { chromaticAberration: number, reflectivity: number }) {
+        if (this.mainMaterial) {
+            this.mainMaterial.uniforms.uChromaticAberration.value = props.chromaticAberration;
+            this.mainMaterial.uniforms.uReflectivity.value = props.reflectivity;
+        }
     }
     
     public updatePointer(x: number, y: number, isActive: boolean) {
@@ -609,6 +664,8 @@ export interface ClarityProps {
   refrostRate: number;
   brushSize: number;
   pixelRatio: number;
+  chromaticAberration: number;
+  reflectivity: number;
   width?: number;
   height?: number;
 }
@@ -676,11 +733,18 @@ export function Clarity(props: ClarityProps) {
   }, [props.width, props.height, props.pixelRatio, handleResize]);
 
   useEffect(() => {
-    controllerRef.current?.updateProps({
+    controllerRef.current?.updateAnimatedProps({
       refrostRate: props.refrostRate,
       brushSize: props.brushSize,
     });
   }, [props.refrostRate, props.brushSize]);
+
+  useEffect(() => {
+    controllerRef.current?.updateVisuals({
+        chromaticAberration: props.chromaticAberration,
+        reflectivity: props.reflectivity,
+    });
+  }, [props.chromaticAberration, props.reflectivity]);
 
   useEffect(() => {
     controllerRef.current?.loadMedia(props.mediaType, props.imageUrl, props.videoUrl);
@@ -720,7 +784,9 @@ Clarity.defaultProps = {
     imageUrl: "https://images.unsplash.com/photo-1470770841072-f978cf4d019e?q=80&w=2070&auto=format&fit=crop",
     refrostRate: 0.0030,
     brushSize: 0.30,
-    pixelRatio: 1.5,
+    pixelRatio: 1.0,
+    chromaticAberration: 0.01,
+    reflectivity: 0.2,
 };
 
 addPropertyControls(Clarity, {
@@ -729,5 +795,7 @@ addPropertyControls(Clarity, {
     videoUrl: { type: ControlType.File, title: "Video", allowedFileTypes: ['mp4', 'webm', 'mov'], hidden: (props: ClarityProps) => props.mediaType !== 'video' },
     refrostRate: { type: ControlType.Number, title: "Refrost Rate", min: 0, max: 0.005, step: 0.0001, defaultValue: 0.0030, displayStepper: true },
     brushSize: { type: ControlType.Number, title: "Pointer Size", min: 0.05, max: 0.5, step: 0.01, defaultValue: 0.30, displayStepper: true },
-    pixelRatio: { type: ControlType.Number, title: "Pixel Ratio", min: 0.5, max: 2, step: 0.1, defaultValue: 1.5, displayStepper: true },
+    reflectivity: { type: ControlType.Number, title: "Reflectivity", min: 0, max: 1.0, step: 0.01, defaultValue: 0.2, displayStepper: true },
+    chromaticAberration: { type: ControlType.Number, title: "Aberration", min: 0, max: 0.1, step: 0.001, defaultValue: 0.01, displayStepper: true },
+    pixelRatio: { type: ControlType.Number, title: "Pixel Ratio", min: 0.5, max: 2, step: 0.1, defaultValue: 1.0, displayStepper: true },
 });
