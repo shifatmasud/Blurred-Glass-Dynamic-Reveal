@@ -330,12 +330,12 @@ class ClarityController {
         if (isActive) { this.mousePosition.set(x, y); }
     }
 
-    public resize = (width: number, height: number, pixelRatio: number) => {
+    public resize = (width: number, height: number) => {
         if (!width || !height || width <= 0 || height <= 0) {
             return;
         }
 
-        this.renderer.setPixelRatio(Math.min(window.devicePixelRatio, pixelRatio));
+        this.renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
         this.renderer.setSize(width, height, false);
         this.camera.updateProjectionMatrix();
 
@@ -649,7 +649,6 @@ export interface ClarityProps {
   mediaScale: number;
   refrostRate: number;
   brushSize: number;
-  pixelRatio: number;
   chromaticAberration: number;
   reflectivity: number;
   width?: number;
@@ -705,9 +704,9 @@ export function Clarity(props: ClarityProps) {
   useEffect(() => {
       const controller = controllerRef.current;
       if (controller && dimensions.width && dimensions.height) {
-          controller.resize(dimensions.width, dimensions.height, props.pixelRatio);
+          controller.resize(dimensions.width, dimensions.height);
       }
-  }, [dimensions, props.pixelRatio]);
+  }, [dimensions]);
 
   // Handle updates to controller props that don't affect size
   useEffect(() => {
@@ -761,7 +760,6 @@ Clarity.defaultProps = {
     mediaScale: 1.0,
     refrostRate: 0.0030,
     brushSize: 0.30,
-    pixelRatio: 1.0,
     chromaticAberration: 0.01,
     reflectivity: 0.2,
 };
@@ -775,5 +773,4 @@ addPropertyControls(Clarity, {
     brushSize: { type: ControlType.Number, title: "Pointer Size", min: 0.05, max: 0.5, step: 0.01, defaultValue: 0.30, displayStepper: true },
     reflectivity: { type: ControlType.Number, title: "Reflectivity", min: 0, max: 1.0, step: 0.01, defaultValue: 0.2, displayStepper: true },
     chromaticAberration: { type: ControlType.Number, title: "Aberration", min: 0, max: 0.1, step: 0.001, defaultValue: 0.01, displayStepper: true },
-    pixelRatio: { type: ControlType.Number, title: "Pixel Ratio", min: 0.5, max: 2, step: 0.1, defaultValue: 1.0, displayStepper: true },
 });
