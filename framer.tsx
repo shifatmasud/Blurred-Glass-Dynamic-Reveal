@@ -1,5 +1,6 @@
 
 
+
 import React, { useRef, useEffect, useCallback, useState, RefObject } from 'react';
 import * as THREE from 'three';
 //@ts-ignore
@@ -618,7 +619,6 @@ function Clarity(props: ClarityProps) {
   const controllerRef = useRef<ClarityController | null>(null);
   const [error, setError] = useState<string | null>(null);
 
-  // A ref to hold the latest props, preventing stale closures in callbacks like ResizeObserver.
   const propsRef = useRef(props);
   useEffect(() => {
     propsRef.current = props;
@@ -628,49 +628,43 @@ function Clarity(props: ClarityProps) {
     setError(message);
   }, []);
 
-  // Effect for creating and cleaning up the controller. Runs only once.
-  useEffect(() => {
+  const handleResize = useCallback(() => {
+    const controller = controllerRef.current;
     const canvas = canvasRef.current;
-    if (!canvas) return;
+    if (!controller || !canvas || !canvas.parentElement) return;
 
     const parent = canvas.parentElement;
-    if (!parent) return;
+    const currentProps = propsRef.current;
     
+    const width = currentProps.width ?? parent.clientWidth;
+    const height = currentProps.height ?? parent.clientHeight;
+    
+    controller.resize(width, height);
+  }, []);
+
+  useEffect(() => {
+    const canvas = canvasRef.current;
+    if (!canvas || !canvas.parentElement) return;
+    
+    const parent = canvas.parentElement;
     const controller = new ClarityController(canvas, handleError);
     controllerRef.current = controller;
 
-    const resizeObserver = new ResizeObserver((entries) => {
-        if (!entries || entries.length === 0) return;
-        const entry = entries[0];
-        // Use the ref to get the latest props, avoiding stale data.
-        const currentProps = propsRef.current;
-        const width = currentProps.width ?? entry.contentRect.width;
-        const height = currentProps.height ?? entry.contentRect.height;
-        controller.resize(width, height);
-    });
+    const resizeObserver = new ResizeObserver(handleResize);
     resizeObserver.observe(parent);
     
-    // Perform initial resize
-    const initialProps = propsRef.current;
-    controller.resize(initialProps.width ?? parent.clientWidth, initialProps.height ?? parent.clientHeight);
+    handleResize(); // Perform initial resize
     
     return () => {
       resizeObserver.disconnect();
       controller.dispose();
       controllerRef.current = null;
     };
-  }, [handleError]);
+  }, [handleError, handleResize]);
 
-  // This effect handles resizes when width/height props change, avoiding a full re-initialization.
   useEffect(() => {
-    const controller = controllerRef.current;
-    const parent = canvasRef.current?.parentElement;
-    if (controller && parent) {
-      const width = props.width ?? parent.clientWidth;
-      const height = props.height ?? parent.clientHeight;
-      controller.resize(width, height);
-    }
-  }, [props.width, props.height]);
+    handleResize();
+  }, [props.width, props.height, handleResize]);
 
   useEffect(() => {
     controllerRef.current?.setRefrostRate(props.refrostRate);
