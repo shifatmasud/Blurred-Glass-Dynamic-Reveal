@@ -52,6 +52,7 @@ const usePointerEvents = (
 
 // --- Shaders ---
 const vertexShader = `
+  precision mediump float;
   varying vec2 vUv;
   void main() {
     vUv = uv;
@@ -60,6 +61,7 @@ const vertexShader = `
 `;
 
 const physicsFragmentShader = `
+  precision mediump float;
   uniform sampler2D uPreviousFrame; // r: clear, g: water, b: drip
   uniform vec2 uResolution;
   uniform vec2 uMouse;
@@ -119,6 +121,7 @@ const physicsFragmentShader = `
 `;
 
 const copyFragmentShader = `
+  precision mediump float;
   uniform sampler2D uTexture;
   uniform vec2 uResolution;
   uniform vec2 uImageResolution;
@@ -148,6 +151,7 @@ const copyFragmentShader = `
 `;
 
 const blurFragmentShader = `
+  precision mediump float;
   uniform sampler2D uInput;
   uniform vec2 uResolution;
   uniform vec2 uDirection;
@@ -169,6 +173,7 @@ const blurFragmentShader = `
 `;
 
 const fragmentShader = `
+  precision mediump float;
   uniform vec2 uResolution;
   uniform sampler2D uSceneTexture;
   uniform sampler2D uPhysicsState;
@@ -344,14 +349,20 @@ class ClarityController {
         this.objectURLs.forEach(url => URL.revokeObjectURL(url));
         this.objectURLs.clear();
     }
-    
-    private async _loadImageTexture(imageUrl: string): Promise<{ texture: THREE.Texture, resolution: THREE.Vector2 }> {
-        const response = await fetch(imageUrl);
-        if (!response.ok) throw new Error(`Failed to fetch image: ${response.statusText}`);
+
+    private async _fetchMediaAsObjectURL(url: string): Promise<string> {
+        const response = await fetch(url);
+        if (!response.ok) {
+            throw new Error(`Failed to fetch media. Status: ${response.statusText}`);
+        }
         const blob = await response.blob();
         const objectURL = URL.createObjectURL(blob);
         this.objectURLs.add(objectURL);
-
+        return objectURL;
+    }
+    
+    private async _loadImageTexture(imageUrl: string): Promise<{ texture: THREE.Texture, resolution: THREE.Vector2 }> {
+        const objectURL = await this._fetchMediaAsObjectURL(imageUrl);
         const loader = new THREE.TextureLoader();
         const texture = await loader.loadAsync(objectURL);
 
@@ -365,11 +376,7 @@ class ClarityController {
     }
     
     private async _loadVideoTexture(videoUrl: string): Promise<{ texture: THREE.VideoTexture, resolution: THREE.Vector2 }> {
-        const response = await fetch(videoUrl);
-        if (!response.ok) throw new Error(`Failed to fetch video: ${response.statusText}`);
-        const blob = await response.blob();
-        const objectURL = URL.createObjectURL(blob);
-        this.objectURLs.add(objectURL);
+        const objectURL = await this._fetchMediaAsObjectURL(videoUrl);
 
         return new Promise((resolve, reject) => {
             const video = document.createElement('video');
@@ -543,15 +550,22 @@ class ClarityController {
     }
 }
 
-export default function Clarity(props: ClarityProps) {
+function Clarity(props: ClarityProps) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const controllerRef = useRef<ClarityController | null>(null);
   const [error, setError] = useState<string | null>(null);
 
+  // A ref to hold the latest props, preventing stale closures in callbacks like ResizeObserver.
+  const propsRef = useRef(props);
+  useEffect(() => {
+    propsRef.current = props;
+  });
+  
   const handleError = useCallback((message: string | null) => {
     setError(message);
   }, []);
 
+  // Effect for creating and cleaning up the controller. Runs only once.
   useEffect(() => {
     const canvas = canvasRef.current;
     if (!canvas) return;
@@ -565,20 +579,35 @@ export default function Clarity(props: ClarityProps) {
     const resizeObserver = new ResizeObserver((entries) => {
         if (!entries || entries.length === 0) return;
         const entry = entries[0];
-        const width = props.width ?? entry.contentRect.width;
-        const height = props.height ?? entry.contentRect.height;
+        // Use the ref to get the latest props, avoiding stale data.
+        const currentProps = propsRef.current;
+        const width = currentProps.width ?? entry.contentRect.width;
+        const height = currentProps.height ?? entry.contentRect.height;
         controller.resize(width, height);
     });
     resizeObserver.observe(parent);
     
-    controller.resize(props.width ?? parent.clientWidth, props.height ?? parent.clientHeight);
+    // Perform initial resize
+    const initialProps = propsRef.current;
+    controller.resize(initialProps.width ?? parent.clientWidth, initialProps.height ?? parent.clientHeight);
     
     return () => {
       resizeObserver.disconnect();
       controller.dispose();
       controllerRef.current = null;
     };
-  }, [props.width, props.height, handleError]);
+  }, [handleError]);
+
+  // This effect handles resizes when width/height props change, avoiding a full re-initialization.
+  useEffect(() => {
+    const controller = controllerRef.current;
+    const parent = canvasRef.current?.parentElement;
+    if (controller && parent) {
+      const width = props.width ?? parent.clientWidth;
+      const height = props.height ?? parent.clientHeight;
+      controller.resize(width, height);
+    }
+  }, [props.width, props.height]);
 
   useEffect(() => {
     controllerRef.current?.setRefrostRate(props.refrostRate);
@@ -621,6 +650,8 @@ export default function Clarity(props: ClarityProps) {
   );
 };
 
+export default Clarity;
+
 //@ts-ignore
 Clarity.defaultProps = {
     mediaType: 'image',
@@ -636,3 +667,62 @@ addPropertyControls(Clarity, {
     refrostRate: { type: ControlType.Number, title: "Refrost Rate", min: 0, max: 0.005, step: 0.0001, defaultValue: 0.0004, displayStepper: true },
     brushSize: { type: ControlType.Number, title: "Pointer Size", min: 0.05, max: 0.5, step: 0.01, defaultValue: 0.15, displayStepper: true },
 });
+
+
+// Standalone App Wrapper with UI Controls
+export function ClarityApp() {
+    const [brushSize, setBrushSize] = useState(0.15);
+    const [refrostRate, setRefrostRate] = useState(0.0004);
+
+    return (
+        <div className="w-screen h-screen text-white flex flex-col items-center justify-center overflow-hidden">
+            <div className="absolute top-4 left-4 sm:top-6 sm:left-6 p-4 z-10 w-[calc(100%-2rem)] max-w-sm animate-fade-in-up">
+                <div className="p-4 bg-black/40 backdrop-blur-lg rounded-xl border border-white/10 shadow-2xl space-y-4">
+                    <h1 className="text-xl font-medium text-center">Clarity Controls</h1>
+                    <div className="space-y-2">
+                        <div className="flex justify-between items-center">
+                          <label htmlFor="brushSize" className="text-sm font-medium text-gray-300">Pointer Size</label>
+                          <span className="text-sm text-gray-400 font-mono bg-white/10 px-2 py-1 rounded">{brushSize.toFixed(2)}</span>
+                        </div>
+                        <input
+                            id="brushSize"
+                            type="range"
+                            min="0.05"
+                            max="0.5"
+                            step="0.01"
+                            value={brushSize}
+                            onChange={(e) => setBrushSize(parseFloat(e.target.value))}
+                            className="w-full custom-slider"
+                            aria-label="Pointer Size"
+                        />
+                    </div>
+                    <div className="space-y-2">
+                        <div className="flex justify-between items-center">
+                          <label htmlFor="refrostRate" className="text-sm font-medium text-gray-300">Refrost Rate</label>
+                           <span className="text-sm text-gray-400 font-mono bg-white/10 px-2 py-1 rounded">{refrostRate.toFixed(4)}</span>
+                        </div>
+                        <input
+                            id="refrostRate"
+                            type="range"
+                            min="0"
+                            max="0.005"
+                            step="0.0001"
+                            value={refrostRate}
+                            onChange={(e) => setRefrostRate(parseFloat(e.target.value))}
+                            className="w-full custom-slider"
+                            aria-label="Refrost Rate"
+                        />
+                    </div>
+                </div>
+            </div>
+            <div className="w-full h-full animate-fade-in absolute inset-0">
+                <Clarity
+                    mediaType="image"
+                    imageUrl="https://images.unsplash.com/photo-1470770841072-f978cf4d019e?q=80&w=2070&auto=format&fit=crop"
+                    brushSize={brushSize}
+                    refrostRate={refrostRate}
+                />
+            </div>
+        </div>
+    );
+}
