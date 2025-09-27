@@ -663,8 +663,8 @@ export interface ClarityProps {
   pixelRatio: number;
   chromaticAberration: number;
   reflectivity: number;
-  width?: number;
-  height?: number;
+  width?: number; // Note: Framer provides these, but we rely on ResizeObserver
+  height?: number; // for more robust sizing.
 }
 
 /**
@@ -677,56 +677,50 @@ export function Clarity(props: ClarityProps) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const controllerRef = useRef<ClarityController | null>(null);
   const [error, setError] = useState<string | null>(null);
-  const propsRef = useRef(props);
-  propsRef.current = props;
 
   const handleError = useCallback((message: string | null) => {
     setError(message);
   }, []);
 
-  const handleResize = useCallback(() => {
-    const controller = controllerRef.current;
-    const canvas = canvasRef.current;
-    if (!controller || !canvas || !canvas.parentElement) return;
-
-    const parent = canvas.parentElement;
-    const { width: propWidth, height: propHeight, pixelRatio } = propsRef.current;
-    
-    const width = propWidth ?? parent.clientWidth;
-    const height = propHeight ?? parent.clientHeight;
-    
-    controller.resize(width, height, pixelRatio);
-  }, []);
-
-  // Initialize controller
+  // Initialize controller and set up ResizeObserver
   useEffect(() => {
     const canvas = canvasRef.current;
     if (!canvas || !canvas.parentElement) return;
     
-    const controller = new ClarityController(canvas, handleError, propsRef.current);
+    const controller = new ClarityController(canvas, handleError, props);
     controllerRef.current = controller;
+
+    const handleResize = () => {
+      const parent = canvas.parentElement;
+      if (parent) {
+        controller.resize(parent.clientWidth, parent.clientHeight, props.pixelRatio);
+      }
+    };
 
     const resizeObserver = new ResizeObserver(handleResize);
     resizeObserver.observe(canvas.parentElement);
-    
-    handleResize();
     
     return () => {
       resizeObserver.disconnect();
       controller.dispose();
       controllerRef.current = null;
     };
-  }, [handleError, handleResize]);
+  }, [handleError]); // Reruns only if error handler changes (it doesn't)
 
-  // Handle updates to props
+  // Handle updates to controller props that don't affect size
   useEffect(() => {
     controllerRef.current?.setProps(props);
   }, [props.refrostRate, props.brushSize, props.chromaticAberration, props.reflectivity]);
   
-  // Handle resize from props
+  // A dedicated effect to handle pixelRatio changes, as this does not trigger the ResizeObserver
   useEffect(() => {
-    handleResize();
-  }, [props.width, props.height, props.pixelRatio, handleResize]);
+      const controller = controllerRef.current;
+      const parent = canvasRef.current?.parentElement;
+      if (controller && parent) {
+          controller.resize(parent.clientWidth, parent.clientHeight, props.pixelRatio);
+      }
+  }, [props.pixelRatio]);
+
 
   // Handle media changes
   useEffect(() => {
