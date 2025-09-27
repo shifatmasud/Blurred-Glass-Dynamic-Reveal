@@ -1,55 +1,9 @@
 
-import React, { useRef, useEffect, useCallback, useState } from 'react';
+
+import React, { useRef, useEffect, useCallback, useState, RefObject } from 'react';
 import * as THREE from 'three';
 //@ts-ignore
 import { addPropertyControls, ControlType } from 'framer';
-
-interface ClarityProps {
-  mediaType: 'image' | 'video';
-  imageUrl?: string;
-  videoUrl?: string;
-  refrostRate: number;
-  brushSize: number;
-  width?: number;
-  height?: number;
-}
-
-// --- Hook for abstracting pointer events ---
-const usePointerEvents = (
-  canvasRef: React.RefObject<HTMLCanvasElement>,
-  onPointerUpdate: (x: number, y: number, isActive: boolean) => void
-) => {
-  useEffect(() => {
-    const canvas = canvasRef.current;
-    if (!canvas) return;
-
-    const updatePointerPosition = (clientX: number, clientY: number) => {
-        const rect = canvas.getBoundingClientRect();
-        const x = clientX - rect.left;
-        const y = rect.height - (clientY - rect.top);
-        onPointerUpdate(x, y, true);
-    };
-
-    const handleMouseMove = (event: MouseEvent) => updatePointerPosition(event.clientX, event.clientY);
-    const handleMouseLeave = () => onPointerUpdate(0, 0, false);
-    const handleTouchMove = (event: TouchEvent) => { if (event.touches.length > 0) updatePointerPosition(event.touches[0].clientX, event.touches[0].clientY); };
-    const handleTouchEnd = () => onPointerUpdate(0, 0, false);
-    
-    canvas.addEventListener('mousemove', handleMouseMove);
-    canvas.addEventListener('mouseleave', handleMouseLeave);
-    canvas.addEventListener('touchmove', handleTouchMove, { passive: true });
-    canvas.addEventListener('touchend', handleTouchEnd);
-    canvas.addEventListener('touchcancel', handleTouchEnd);
-
-    return () => {
-      canvas.removeEventListener('mousemove', handleMouseMove);
-      canvas.removeEventListener('mouseleave', handleMouseLeave);
-      canvas.removeEventListener('touchmove', handleTouchMove);
-      canvas.removeEventListener('touchend', handleTouchEnd);
-    };
-  }, [canvasRef, onPointerUpdate]);
-};
-
 
 // --- Shaders ---
 const vertexShader = `
@@ -217,6 +171,7 @@ const fragmentShader = `
   }
 `;
 
+// --- WebGL Controller Class ---
 class ClarityController {
     private canvas: HTMLCanvasElement;
     private renderer: THREE.WebGLRenderer;
@@ -257,7 +212,7 @@ class ClarityController {
     private isReady = false;
     private loadMediaRequestId = 0;
     
-    private currentBrushSize = 0.15;
+    private currentBrushSize = 0.30;
     private onError: (message: string | null) => void;
     
     private static MAX_TEXTURE_SIZE = 2048;
@@ -284,7 +239,7 @@ class ClarityController {
         this.copyScene = new THREE.Scene();
         this.copyScene.add(new THREE.Mesh(this.planeGeometry, this.copyMaterial));
         
-        this.physicsMaterial = new THREE.ShaderMaterial({ vertexShader, fragmentShader: physicsFragmentShader, uniforms: { uPreviousFrame: { value: null }, uResolution: { value: new THREE.Vector2() }, uMouse: { value: new THREE.Vector2() }, uBrushSize: { value: 120.0 }, uRefrostRate: { value: 0.0004 }, uIsMouseActive: { value: 0.0 } } });
+        this.physicsMaterial = new THREE.ShaderMaterial({ vertexShader, fragmentShader: physicsFragmentShader, uniforms: { uPreviousFrame: { value: null }, uResolution: { value: new THREE.Vector2() }, uMouse: { value: new THREE.Vector2() }, uBrushSize: { value: 120.0 }, uRefrostRate: { value: 0.0030 }, uIsMouseActive: { value: 0.0 } } });
         this.physicsScene = new THREE.Scene();
         this.physicsScene.add(new THREE.Mesh(this.planeGeometry, this.physicsMaterial));
         
@@ -607,6 +562,57 @@ class ClarityController {
     }
 }
 
+// --- Pointer Events Hook ---
+const usePointerEvents = (
+  canvasRef: RefObject<HTMLCanvasElement>,
+  onPointerUpdate: (x: number, y: number, isActive: boolean) => void
+) => {
+  useEffect(() => {
+    const canvas = canvasRef.current;
+    if (!canvas) return;
+
+    const updatePointerPosition = (clientX: number, clientY: number) => {
+        const rect = canvas.getBoundingClientRect();
+        const x = clientX - rect.left;
+        const y = rect.height - (clientY - rect.top);
+        onPointerUpdate(x, y, true);
+    };
+
+    const handleMouseMove = (event: MouseEvent) => updatePointerPosition(event.clientX, event.clientY);
+    const handleMouseLeave = () => onPointerUpdate(0, 0, false);
+    const handleTouchMove = (event: TouchEvent) => { if (event.touches.length > 0) updatePointerPosition(event.touches[0].clientX, event.touches[0].clientY); };
+    const handleTouchEnd = () => onPointerUpdate(0, 0, false);
+    
+    canvas.addEventListener('mousemove', handleMouseMove);
+    canvas.addEventListener('mouseleave', handleMouseLeave);
+    canvas.addEventListener('touchmove', handleTouchMove, { passive: true });
+    canvas.addEventListener('touchend', handleTouchEnd);
+    canvas.addEventListener('touchcancel', handleTouchEnd);
+
+    return () => {
+      canvas.removeEventListener('mousemove', handleMouseMove);
+      canvas.removeEventListener('mouseleave', handleMouseLeave);
+      canvas.removeEventListener('touchmove', handleTouchMove);
+      canvas.removeEventListener('touchend', handleTouchEnd);
+    };
+  }, [canvasRef, onPointerUpdate]);
+};
+
+// --- Main Framer Component ---
+export interface ClarityProps {
+  mediaType: 'image' | 'video';
+  imageUrl?: string;
+  videoUrl?: string;
+  refrostRate: number;
+  brushSize: number;
+  width?: number;
+  height?: number;
+}
+
+/**
+ * @framerSupportedLayoutWidth auto
+ * @framerSupportedLayoutHeight auto
+ */
 function Clarity(props: ClarityProps) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const controllerRef = useRef<ClarityController | null>(null);
@@ -707,29 +713,27 @@ function Clarity(props: ClarityProps) {
   );
 };
 
-export default Clarity;
-
-//@ts-ignore
 Clarity.defaultProps = {
     mediaType: 'image',
     imageUrl: "https://images.unsplash.com/photo-1470770841072-f978cf4d019e?q=80&w=2070&auto=format&fit=crop",
-    refrostRate: 0.0004,
-    brushSize: 0.15,
-} 
+    refrostRate: 0.0030,
+    brushSize: 0.30,
+};
 
 addPropertyControls(Clarity, {
     mediaType: { type: ControlType.Enum, title: "Media", options: ['image', 'video'], defaultValue: 'image' },
     imageUrl: { type: ControlType.Image, title: "Image", hidden: (props: ClarityProps) => props.mediaType !== 'image' },
     videoUrl: { type: ControlType.File, title: "Video", allowedFileTypes: ['mp4', 'webm', 'mov'], hidden: (props: ClarityProps) => props.mediaType !== 'video' },
-    refrostRate: { type: ControlType.Number, title: "Refrost Rate", min: 0, max: 0.005, step: 0.0001, defaultValue: 0.0004, displayStepper: true },
-    brushSize: { type: ControlType.Number, title: "Pointer Size", min: 0.05, max: 0.5, step: 0.01, defaultValue: 0.15, displayStepper: true },
+    refrostRate: { type: ControlType.Number, title: "Refrost Rate", min: 0, max: 0.005, step: 0.0001, defaultValue: 0.0030, displayStepper: true },
+    brushSize: { type: ControlType.Number, title: "Pointer Size", min: 0.05, max: 0.5, step: 0.01, defaultValue: 0.30, displayStepper: true },
 });
 
+export default Clarity;
 
-// Standalone App Wrapper with UI Controls
+// --- Standalone App Wrapper with UI Controls ---
 export function ClarityApp() {
-    const [brushSize, setBrushSize] = useState(0.15);
-    const [refrostRate, setRefrostRate] = useState(0.0004);
+    const [brushSize, setBrushSize] = useState(0.30);
+    const [refrostRate, setRefrostRate] = useState(0.0030);
 
     return (
         <div className="w-screen h-screen text-white flex flex-col items-center justify-center overflow-hidden">
