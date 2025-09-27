@@ -281,7 +281,7 @@ class ClarityController {
         this.blurScene = new THREE.Scene();
         this.blurScene.add(new THREE.Mesh(geometry, this.blurMaterial));
 
-        const renderTargetOptions = { minFilter: THREE.LinearFilter, magFilter: THREE.LinearFilter, format: THREE.RGBAFormat, type: THREE.HalfFloatType, stencilBuffer: false };
+        const renderTargetOptions = { minFilter: THREE.LinearFilter, magFilter: THREE.LinearFilter, format: THREE.RGBAFormat, type: THREE.UnsignedByteType, stencilBuffer: false };
         this.physicsRenderTargetA = new THREE.WebGLRenderTarget(1, 1, renderTargetOptions);
         this.physicsRenderTargetB = new THREE.WebGLRenderTarget(1, 1, renderTargetOptions);
         this.sceneRenderTarget = new THREE.WebGLRenderTarget(1, 1, renderTargetOptions);

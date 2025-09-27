@@ -193,7 +193,7 @@ const ParallaxCanvas: React.FC<ParallaxCanvasProps> = (props) => {
 
         mainGroup = new THREE.Group()
         const planeGeom = new THREE.PlaneGeometry(1, 1)
-        const displacedGeom = new THREE.PlaneGeometry(1, 1, 256, 256)
+        const displacedGeom = new THREE.PlaneGeometry(1, 1, 128, 128)
 
         const infillMesh = new THREE.Mesh(planeGeom, infillMaterial)
         const bgMesh = new THREE.Mesh(planeGeom, backgroundMaterial)
