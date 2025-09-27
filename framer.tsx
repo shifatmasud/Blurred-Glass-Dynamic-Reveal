@@ -86,11 +86,13 @@ const Shaders = {
             float imageAspect = uImageResolution.x / uImageResolution.y;
 
             if (canvasAspect > imageAspect) {
-                float scale = imageAspect / canvasAspect;
-                st.y = st.y * scale + (1.0 - scale) / 2.0;
-            } else {
+                // Canvas is wider than image. Fit to width, crop top/bottom.
                 float scale = canvasAspect / imageAspect;
-                st.x = st.x * scale + (1.0 - scale) / 2.0;
+                st.y = st.y * scale - (scale - 1.0) / 2.0;
+            } else {
+                // Canvas is taller than image. Fit to height, crop left/right.
+                float scale = imageAspect / canvasAspect;
+                st.x = st.x * scale - (scale - 1.0) / 2.0;
             }
         }
         return st;
@@ -210,6 +212,7 @@ class ClarityController {
     private physicsRenderTargetA: THREE.WebGLRenderTarget;
     private physicsRenderTargetB: THREE.WebGLRenderTarget;
     private sceneRenderTarget: THREE.WebGLRenderTarget;
+    private downscaledSceneRenderTarget: THREE.WebGLRenderTarget;
     private blurRenderTargetA: THREE.WebGLRenderTarget;
     private blurRenderTargetB: THREE.WebGLRenderTarget;
 
@@ -233,15 +236,16 @@ class ClarityController {
     private animatedProps = { refrostRate: 0.0030, brushSize: 0.30 };
     
     private onError: (message: string | null) => void;
+    private onMediaSized: (width: number, height: number) => void;
     
     // Constants
     private static DOWNSAMPLE_FACTOR = 8;
     private static PHYSICS_DOWNSAMPLE_FACTOR = 4;
-    private static MAX_TEXTURE_SIZE = 480;
 
-    constructor(canvas: HTMLCanvasElement, onError: (message: string | null) => void, initialProps: ClarityProps) {
+    constructor(canvas: HTMLCanvasElement, onError: (message: string | null) => void, onMediaSized: (width: number, height: number) => void, initialProps: ClarityProps) {
         this.canvas = canvas;
         this.onError = onError;
+        this.onMediaSized = onMediaSized;
         this.props = initialProps;
         
         this.targetProps.refrostRate = initialProps.refrostRate;
@@ -306,6 +310,7 @@ class ClarityController {
         this.physicsRenderTargetA = new THREE.WebGLRenderTarget(1, 1, options);
         this.physicsRenderTargetB = new THREE.WebGLRenderTarget(1, 1, options);
         this.sceneRenderTarget = new THREE.WebGLRenderTarget(1, 1, options);
+        this.downscaledSceneRenderTarget = new THREE.WebGLRenderTarget(1, 1, options);
         this.blurRenderTargetA = new THREE.WebGLRenderTarget(1, 1, options);
         this.blurRenderTargetB = new THREE.WebGLRenderTarget(1, 1, options);
     }
@@ -347,6 +352,7 @@ class ClarityController {
         this.physicsRenderTargetA.setSize(physicsWidth, physicsHeight);
         this.physicsRenderTargetB.setSize(physicsWidth, physicsHeight);
         this.sceneRenderTarget.setSize(width, height);
+        this.downscaledSceneRenderTarget.setSize(downsampledWidth, downsampledHeight);
         this.blurRenderTargetA.setSize(downsampledWidth, downsampledHeight);
         this.blurRenderTargetB.setSize(downsampledWidth, downsampledHeight);
         
@@ -387,6 +393,8 @@ class ClarityController {
                  result.texture.dispose();
                  return;
             }
+            
+            this.onMediaSized(result.resolution.x, result.resolution.y);
 
             console.log("Clarity: Media loaded successfully.");
             result.texture.colorSpace = THREE.SRGBColorSpace;
@@ -437,6 +445,7 @@ class ClarityController {
         this.physicsRenderTargetA.dispose();
         this.physicsRenderTargetB.dispose();
         this.sceneRenderTarget.dispose();
+        this.downscaledSceneRenderTarget.dispose();
         this.blurRenderTargetA.dispose();
         this.blurRenderTargetB.dispose();
     
@@ -491,13 +500,17 @@ class ClarityController {
     }
     
     private _renderSceneAndBlurPasses() {
-        // Render the source media to a texture
+        // Render the full-res source media to a texture for the 'clear' layer
         this.renderer.setRenderTarget(this.sceneRenderTarget);
         this.renderer.render(this.copyScene, this.camera);
         
-        // Horizontal blur pass
+        // Render the source media again to a smaller texture for blurring (GPU-side downscaling)
+        this.renderer.setRenderTarget(this.downscaledSceneRenderTarget);
+        this.renderer.render(this.copyScene, this.camera);
+
+        // Horizontal blur pass on the downscaled texture
         this.renderer.setRenderTarget(this.blurRenderTargetA);
-        this.blurMaterial.uniforms.uInput.value = this.sceneRenderTarget.texture;
+        this.blurMaterial.uniforms.uInput.value = this.downscaledSceneRenderTarget.texture;
         this.blurMaterial.uniforms.uDirection.value.set(1.0, 0.0);
         this.renderer.render(this.blurScene, this.camera);
 
@@ -539,45 +552,20 @@ class ClarityController {
     private async _loadImageTexture(imageUrl: string): Promise<{ texture: THREE.Texture, resolution: THREE.Vector2 }> {
         const loader = new THREE.TextureLoader();
         loader.setCrossOrigin("Anonymous");
-        const originalTexture = await loader.loadAsync(imageUrl).catch(() => {
+        const texture = await loader.loadAsync(imageUrl).catch(() => {
              throw new Error(`Failed to load image. Check CORS policy or URL: ${imageUrl}`);
         });
 
         if (this.isCancelled) {
-            originalTexture.dispose();
+            texture.dispose();
             throw new Error('Component unmounted during texture load');
         }
 
-        const image = originalTexture.image as HTMLImageElement;
-        const { width, height } = image;
-
-        if (width <= ClarityController.MAX_TEXTURE_SIZE && height <= ClarityController.MAX_TEXTURE_SIZE) {
-            return { texture: originalTexture, resolution: new THREE.Vector2(width, height) };
-        }
-        
-        console.log(`Clarity: Downscaling image from ${width}x${height} to fit within ${ClarityController.MAX_TEXTURE_SIZE}px.`);
-        const canvas = document.createElement('canvas');
-        const ctx = canvas.getContext('2d');
-        if (!ctx) {
-            console.warn("Clarity: Could not get 2D context for image resizing.");
-            return { texture: originalTexture, resolution: new THREE.Vector2(width, height) };
-        }
-
-        const aspectRatio = width / height;
-        if (width > height) {
-            canvas.width = ClarityController.MAX_TEXTURE_SIZE;
-            canvas.height = Math.round(ClarityController.MAX_TEXTURE_SIZE / aspectRatio);
-        } else {
-            canvas.height = ClarityController.MAX_TEXTURE_SIZE;
-            canvas.width = Math.round(ClarityController.MAX_TEXTURE_SIZE * aspectRatio);
-        }
-
-        ctx.drawImage(image, 0, 0, canvas.width, canvas.height);
-        originalTexture.dispose();
+        const image = texture.image as HTMLImageElement;
         
         return { 
-            texture: new THREE.CanvasTexture(canvas), 
-            resolution: new THREE.Vector2(canvas.width, canvas.height)
+            texture, 
+            resolution: new THREE.Vector2(image.width, image.height)
         };
     }
     
@@ -658,13 +646,14 @@ export interface ClarityProps {
   mediaType: 'image' | 'video';
   imageUrl?: string;
   videoUrl?: string;
+  mediaScale: number;
   refrostRate: number;
   brushSize: number;
   pixelRatio: number;
   chromaticAberration: number;
   reflectivity: number;
-  width?: number; // Note: Framer provides these, but we rely on ResizeObserver
-  height?: number; // for more robust sizing.
+  width?: number;
+  height?: number;
 }
 
 /**
@@ -677,50 +666,53 @@ export function Clarity(props: ClarityProps) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const controllerRef = useRef<ClarityController | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [dimensions, setDimensions] = useState({ width: props.width, height: props.height });
+  const [originalMediaDimensions, setOriginalMediaDimensions] = useState<{width?: number, height?: number}>({ width: undefined, height: undefined });
 
   const handleError = useCallback((message: string | null) => {
     setError(message);
   }, []);
+  
+  const handleMediaSized = useCallback((width: number, height: number) => {
+      setOriginalMediaDimensions({ width, height });
+  }, []);
 
-  // Initialize controller and set up ResizeObserver
+  // Initialize controller
   useEffect(() => {
     const canvas = canvasRef.current;
-    if (!canvas || !canvas.parentElement) return;
+    if (!canvas) return;
     
-    const controller = new ClarityController(canvas, handleError, props);
+    const controller = new ClarityController(canvas, handleError, handleMediaSized, props);
     controllerRef.current = controller;
-
-    const handleResize = () => {
-      const parent = canvas.parentElement;
-      if (parent) {
-        controller.resize(parent.clientWidth, parent.clientHeight, props.pixelRatio);
-      }
-    };
-
-    const resizeObserver = new ResizeObserver(handleResize);
-    resizeObserver.observe(canvas.parentElement);
     
     return () => {
-      resizeObserver.disconnect();
       controller.dispose();
       controllerRef.current = null;
     };
-  }, [handleError]); // Reruns only if error handler changes (it doesn't)
+  }, [handleError, handleMediaSized]);
+  
+  // Calculate final dimensions when media or scale changes
+  useEffect(() => {
+    if (originalMediaDimensions.width && originalMediaDimensions.height) {
+        setDimensions({
+            width: originalMediaDimensions.width * props.mediaScale,
+            height: originalMediaDimensions.height * props.mediaScale,
+        });
+    }
+  }, [originalMediaDimensions, props.mediaScale]);
+
+  // Resize controller when component dimensions or pixelRatio change
+  useEffect(() => {
+      const controller = controllerRef.current;
+      if (controller && dimensions.width && dimensions.height) {
+          controller.resize(dimensions.width, dimensions.height, props.pixelRatio);
+      }
+  }, [dimensions, props.pixelRatio]);
 
   // Handle updates to controller props that don't affect size
   useEffect(() => {
     controllerRef.current?.setProps(props);
   }, [props.refrostRate, props.brushSize, props.chromaticAberration, props.reflectivity]);
-  
-  // A dedicated effect to handle pixelRatio changes, as this does not trigger the ResizeObserver
-  useEffect(() => {
-      const controller = controllerRef.current;
-      const parent = canvasRef.current?.parentElement;
-      if (controller && parent) {
-          controller.resize(parent.clientWidth, parent.clientHeight, props.pixelRatio);
-      }
-  }, [props.pixelRatio]);
-
 
   // Handle media changes
   useEffect(() => {
@@ -734,7 +726,14 @@ export function Clarity(props: ClarityProps) {
   usePointerEvents(canvasRef, onPointerUpdate);
 
   return (
-    <div className="w-full h-full relative bg-black/20">
+    <div 
+      className="relative bg-black/20 inline-block overflow-hidden"
+      style={{
+          width: dimensions.width ? `${dimensions.width}px` : 'auto',
+          height: dimensions.height ? `${dimensions.height}px` : 'auto',
+          transition: 'width 0.4s ease-out, height 0.4s ease-out',
+      }}
+    >
       <canvas 
         ref={canvasRef} 
         className="w-full h-full" 
@@ -759,6 +758,7 @@ export function Clarity(props: ClarityProps) {
 Clarity.defaultProps = {
     mediaType: 'image',
     imageUrl: "https://images.unsplash.com/photo-1470770841072-f978cf4d019e?q=80&w=2070&auto=format&fit=crop",
+    mediaScale: 1.0,
     refrostRate: 0.0030,
     brushSize: 0.30,
     pixelRatio: 1.0,
@@ -770,6 +770,7 @@ addPropertyControls(Clarity, {
     mediaType: { type: ControlType.Enum, title: "Media", options: ['image', 'video'], defaultValue: 'image' },
     imageUrl: { type: ControlType.Image, title: "Image", hidden: (props: ClarityProps) => props.mediaType !== 'image' },
     videoUrl: { type: ControlType.File, title: "Video", allowedFileTypes: ['mp4', 'webm', 'mov'], hidden: (props: ClarityProps) => props.mediaType !== 'video' },
+    mediaScale: { type: ControlType.Number, title: "Media Scale", min: 0.1, max: 2, step: 0.01, defaultValue: 1.0, displayStepper: true },
     refrostRate: { type: ControlType.Number, title: "Refrost Rate", min: 0, max: 0.005, step: 0.0001, defaultValue: 0.0030, displayStepper: true },
     brushSize: { type: ControlType.Number, title: "Pointer Size", min: 0.05, max: 0.5, step: 0.01, defaultValue: 0.30, displayStepper: true },
     reflectivity: { type: ControlType.Number, title: "Reflectivity", min: 0, max: 1.0, step: 0.01, defaultValue: 0.2, displayStepper: true },
