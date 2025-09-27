@@ -1,4 +1,5 @@
 
+
 import React, { useRef, useEffect, useCallback, useState, RefObject } from 'react';
 import * as THREE from 'three';
 //@ts-ignore
@@ -249,8 +250,6 @@ class ClarityController {
         this._initMaterials();
         this._initScenes();
         this._initRenderTargets();
-        
-        this.start();
     }
     
     private _initRendererAndCamera() {
@@ -332,7 +331,8 @@ class ClarityController {
             return;
         }
 
-        if (!this.isReady) console.log(`Clarity: Canvas resized to ${width}x${height}, starting render.`);
+        const wasNotReady = !this.isReady;
+        if (wasNotReady) console.log(`Clarity: Canvas resized to ${width}x${height}, starting render.`);
         this.isReady = true;
 
         this.renderer.setPixelRatio(Math.min(window.devicePixelRatio, pixelRatio));
@@ -356,6 +356,10 @@ class ClarityController {
         this.sceneRenderTarget.setSize(width, height);
         this.blurRenderTargetA.setSize(downsampledWidth, downsampledHeight);
         this.blurRenderTargetB.setSize(downsampledWidth, downsampledHeight);
+
+        if (wasNotReady) {
+            this.start();
+        }
     }
     
     public async loadMedia(mediaType: 'image' | 'video', imageUrl?: string, videoUrl?: string) {
@@ -391,10 +395,6 @@ class ClarityController {
             result.texture.colorSpace = THREE.SRGBColorSpace;
             this.copyMaterial.uniforms.uTexture.value = result.texture;
             this.copyMaterial.uniforms.uImageResolution.value.copy(result.resolution);
-            
-            const size = new THREE.Vector2();
-            this.renderer.getSize(size);
-            this.resize(size.x, size.y, this.props.pixelRatio);
 
         } catch (error) {
             if (this.isCancelled || currentRequestId !== this.loadMediaRequestId) {
@@ -412,7 +412,10 @@ class ClarityController {
         }
     }
     
-    public start() { this._animate(); }
+    public start() { 
+        if (this.animationFrameId !== null) return;
+        this._animate(); 
+    }
 
     public dispose() {
         this.isCancelled = true;
