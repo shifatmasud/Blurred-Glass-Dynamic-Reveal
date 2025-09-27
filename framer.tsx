@@ -1,6 +1,7 @@
 
 
 
+
 import React, { useRef, useEffect, useCallback, useState, RefObject } from 'react';
 import * as THREE from 'three';
 //@ts-ignore
@@ -204,7 +205,6 @@ class ClarityController {
 
     private mediaState = { type: '', src: '', loading: false };
     private videoElement: HTMLVideoElement | null = null;
-    private objectURLs = new Set<string>();
     
     private isCancelled = false;
     private animationFrameId: number | null = null;
@@ -316,25 +316,14 @@ class ClarityController {
             this.copyMaterial.uniforms.uTexture.value.dispose();
             this.copyMaterial.uniforms.uTexture.value = null;
         }
-        this.objectURLs.forEach(url => URL.revokeObjectURL(url));
-        this.objectURLs.clear();
-    }
-
-    private async _fetchMediaAsObjectURL(url: string): Promise<string> {
-        const response = await fetch(url);
-        if (!response.ok) {
-            throw new Error(`Failed to fetch media. Status: ${response.statusText}`);
-        }
-        const blob = await response.blob();
-        const objectURL = URL.createObjectURL(blob);
-        this.objectURLs.add(objectURL);
-        return objectURL;
     }
     
     private async _loadImageTexture(imageUrl: string): Promise<{ texture: THREE.Texture, resolution: THREE.Vector2 }> {
-        const objectURL = await this._fetchMediaAsObjectURL(imageUrl);
         const loader = new THREE.TextureLoader();
-        const originalTexture = await loader.loadAsync(objectURL);
+        loader.setCrossOrigin("Anonymous");
+        const originalTexture = await loader.loadAsync(imageUrl).catch(err => {
+             throw new Error(`Failed to load image. This may be a CORS issue or an invalid URL. Ensure the image is accessible. URL: ${imageUrl}`);
+        });
 
         if (this.isCancelled) {
             originalTexture.dispose();
@@ -379,8 +368,6 @@ class ClarityController {
     }
     
     private async _loadVideoTexture(videoUrl: string): Promise<{ texture: THREE.VideoTexture, resolution: THREE.Vector2 }> {
-        const objectURL = await this._fetchMediaAsObjectURL(videoUrl);
-
         return new Promise((resolve, reject) => {
             const video = document.createElement('video');
             this.videoElement = video;
@@ -410,13 +397,14 @@ class ClarityController {
 
             const onError = (e: Event | string) => {
                 cleanup();
-                reject(new Error(`Failed to load video. Error: ${e.toString()}`));
+                reject(new Error(`Failed to load video. This may be a CORS issue or an invalid URL. Ensure the video is accessible. URL: ${videoUrl}`));
             };
 
             video.addEventListener('canplay', onCanPlay);
             video.addEventListener('error', onError);
 
-            video.src = objectURL;
+            video.crossOrigin = "Anonymous";
+            video.src = videoUrl;
             video.muted = true;
             video.loop = true;
             video.playsInline = true;
@@ -471,11 +459,7 @@ class ClarityController {
             }
             let errorMessage = "An unknown error occurred while loading media.";
             if (error instanceof Error) {
-                if (error.message.includes("Failed to fetch")) {
-                    errorMessage = `Network Error: Could not fetch media. This is often a CORS policy issue on the server hosting the media. Please ensure the asset is publicly accessible. URL: ${src}`;
-                } else {
-                    errorMessage = error.message;
-                }
+                errorMessage = error.message;
             } else {
                 errorMessage = String(error);
             }
