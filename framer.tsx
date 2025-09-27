@@ -1,3 +1,4 @@
+
 import React, { useRef, useEffect, useCallback, useState } from 'react';
 import * as THREE from 'three';
 //@ts-ignore
@@ -251,18 +252,26 @@ class ClarityController {
     
     private isCancelled = false;
     private animationFrameId: number | null = null;
-    private static DOWNSAMPLE_FACTOR = 2;
+    private static DOWNSAMPLE_FACTOR = 8;
+    private static PHYSICS_DOWNSAMPLE_FACTOR = 4;
     private isReady = false;
     private loadMediaRequestId = 0;
     
     private currentBrushSize = 0.15;
     private onError: (message: string | null) => void;
+    
+    private static MAX_TEXTURE_SIZE = 2048;
 
     constructor(canvas: HTMLCanvasElement, onError: (message: string | null) => void) {
         this.canvas = canvas;
         this.onError = onError;
-        this.renderer = new THREE.WebGLRenderer({ canvas, antialias: true, alpha: true });
-        this.renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+        this.renderer = new THREE.WebGLRenderer({
+            canvas,
+            antialias: false,
+            alpha: true,
+            powerPreference: 'low-power',
+        });
+        this.renderer.setPixelRatio(Math.min(window.devicePixelRatio, 1.5));
         
         this.camera = new THREE.OrthographicCamera(-1, 1, 1, -1, 0, 1);
         this.planeGeometry = new THREE.PlaneGeometry(2, 2);
@@ -305,7 +314,7 @@ class ClarityController {
         this.renderer.getSize(size);
         const brushPixelSize = Math.min(size.x, size.y) * brushSize;
         this.mainMaterial.uniforms.uBrushSize.value = brushPixelSize;
-        this.physicsMaterial.uniforms.uBrushSize.value = brushPixelSize;
+        this.physicsMaterial.uniforms.uBrushSize.value = brushPixelSize / ClarityController.PHYSICS_DOWNSAMPLE_FACTOR;
     }
     public resize = (width: number, height: number) => {
         if (width <= 0 || height <= 0) {
@@ -323,15 +332,18 @@ class ClarityController {
         const downsampledWidth = Math.max(1, Math.round(width / ClarityController.DOWNSAMPLE_FACTOR));
         const downsampledHeight = Math.max(1, Math.round(height / ClarityController.DOWNSAMPLE_FACTOR));
         
+        const physicsWidth = Math.max(1, Math.round(width / ClarityController.PHYSICS_DOWNSAMPLE_FACTOR));
+        const physicsHeight = Math.max(1, Math.round(height / ClarityController.PHYSICS_DOWNSAMPLE_FACTOR));
+
         this.updateBrushSize(this.currentBrushSize);
         
         this.mainMaterial.uniforms.uResolution.value.set(width, height);
         this.copyMaterial.uniforms.uResolution.value.set(width, height);
-        this.physicsMaterial.uniforms.uResolution.value.set(width, height);
+        this.physicsMaterial.uniforms.uResolution.value.set(physicsWidth, physicsHeight);
         this.blurMaterial.uniforms.uResolution.value.set(downsampledWidth, downsampledHeight);
         
-        this.physicsRenderTargetA.setSize(width, height);
-        this.physicsRenderTargetB.setSize(width, height);
+        this.physicsRenderTargetA.setSize(physicsWidth, physicsHeight);
+        this.physicsRenderTargetB.setSize(physicsWidth, physicsHeight);
         this.sceneRenderTarget.setSize(width, height);
         this.blurRenderTargetA.setSize(downsampledWidth, downsampledHeight);
         this.blurRenderTargetB.setSize(downsampledWidth, downsampledHeight);
@@ -366,15 +378,48 @@ class ClarityController {
     private async _loadImageTexture(imageUrl: string): Promise<{ texture: THREE.Texture, resolution: THREE.Vector2 }> {
         const objectURL = await this._fetchMediaAsObjectURL(imageUrl);
         const loader = new THREE.TextureLoader();
-        const texture = await loader.loadAsync(objectURL);
+        const originalTexture = await loader.loadAsync(objectURL);
 
         if (this.isCancelled) {
-            texture.dispose();
+            originalTexture.dispose();
             throw new Error('Component unmounted during texture load');
         }
-        
-        const resolution = new THREE.Vector2(texture.image.width, texture.image.height);
-        return { texture, resolution };
+
+        const image = originalTexture.image as HTMLImageElement;
+        let width = image.width;
+        let height = image.height;
+
+        if (width > ClarityController.MAX_TEXTURE_SIZE || height > ClarityController.MAX_TEXTURE_SIZE) {
+            console.log(`Clarity: Downscaling image from ${width}x${height} to fit within ${ClarityController.MAX_TEXTURE_SIZE}px.`);
+            const canvas = document.createElement('canvas');
+            const ctx = canvas.getContext('2d');
+            if (!ctx) {
+                console.warn("Clarity: Could not get 2D context for image resizing. Using original image.");
+                const resolution = new THREE.Vector2(width, height);
+                return { texture: originalTexture, resolution };
+            }
+
+            const aspectRatio = width / height;
+            if (width > height) {
+                canvas.width = ClarityController.MAX_TEXTURE_SIZE;
+                canvas.height = Math.round(ClarityController.MAX_TEXTURE_SIZE / aspectRatio);
+            } else {
+                canvas.height = ClarityController.MAX_TEXTURE_SIZE;
+                canvas.width = Math.round(ClarityController.MAX_TEXTURE_SIZE * aspectRatio);
+            }
+
+            ctx.drawImage(image, 0, 0, canvas.width, canvas.height);
+            
+            originalTexture.dispose();
+            
+            const scaledTexture = new THREE.CanvasTexture(canvas);
+            const resolution = new THREE.Vector2(canvas.width, canvas.height);
+            return { texture: scaledTexture, resolution };
+
+        } else {
+            const resolution = new THREE.Vector2(width, height);
+            return { texture: originalTexture, resolution };
+        }
     }
     
     private async _loadVideoTexture(videoUrl: string): Promise<{ texture: THREE.VideoTexture, resolution: THREE.Vector2 }> {
@@ -499,7 +544,10 @@ class ClarityController {
         
         this.renderer.setRenderTarget(this.physicsRenderTargetB);
         this.physicsMaterial.uniforms.uPreviousFrame.value = this.physicsRenderTargetA.texture;
-        this.physicsMaterial.uniforms.uMouse.value.copy(this.smoothedMouse);
+        
+        const physicsMouse = this.smoothedMouse.clone().divideScalar(ClarityController.PHYSICS_DOWNSAMPLE_FACTOR);
+        this.physicsMaterial.uniforms.uMouse.value.copy(physicsMouse);
+
         this.physicsMaterial.uniforms.uIsMouseActive.value = this.isMouseActive ? 1.0 : 0.0;
         this.renderer.render(this.physicsScene, this.camera);
         [this.physicsRenderTargetA, this.physicsRenderTargetB] = [this.physicsRenderTargetB, this.physicsRenderTargetA];
