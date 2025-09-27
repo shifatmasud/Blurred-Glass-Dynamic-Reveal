@@ -1,3 +1,4 @@
+
 import React, { useRef, useEffect, useCallback, useState, RefObject } from 'react';
 import * as THREE from 'three';
 //@ts-ignore
@@ -210,7 +211,6 @@ class ClarityController {
     private physicsRenderTargetA: THREE.WebGLRenderTarget;
     private physicsRenderTargetB: THREE.WebGLRenderTarget;
     private sceneRenderTarget: THREE.WebGLRenderTarget;
-    private downscaledSceneRenderTarget: THREE.WebGLRenderTarget;
     private blurRenderTargetA: THREE.WebGLRenderTarget;
     private blurRenderTargetB: THREE.WebGLRenderTarget;
 
@@ -236,9 +236,16 @@ class ClarityController {
     private onError: (message: string | null) => void;
     private onMediaSized: (width: number, height: number) => void;
     
+    // Resource Management State
+    private isPaused = false;
+    private isIdle = false;
+    private lastInteractionTime = Date.now();
+
     // Constants
     private static DOWNSAMPLE_FACTOR = 8;
     private static PHYSICS_DOWNSAMPLE_FACTOR = 4;
+    private static IDLE_TIMEOUT = 2000; // ms
+    private static IDLE_FRAME_INTERVAL = 100; // ms, for ~10fps
 
     constructor(canvas: HTMLCanvasElement, onError: (message: string | null) => void, onMediaSized: (width: number, height: number) => void, initialProps: ClarityProps) {
         this.canvas = canvas;
@@ -308,7 +315,6 @@ class ClarityController {
         this.physicsRenderTargetA = new THREE.WebGLRenderTarget(1, 1, options);
         this.physicsRenderTargetB = new THREE.WebGLRenderTarget(1, 1, options);
         this.sceneRenderTarget = new THREE.WebGLRenderTarget(1, 1, options);
-        this.downscaledSceneRenderTarget = new THREE.WebGLRenderTarget(1, 1, options);
         this.blurRenderTargetA = new THREE.WebGLRenderTarget(1, 1, options);
         this.blurRenderTargetB = new THREE.WebGLRenderTarget(1, 1, options);
     }
@@ -325,7 +331,10 @@ class ClarityController {
     
     public updatePointer(x: number, y: number, isActive: boolean) {
         this.isMouseActive = isActive;
-        if (isActive) { this.mousePosition.set(x, y); }
+        if (isActive) { 
+            this.mousePosition.set(x, y); 
+            this.lastInteractionTime = Date.now();
+        }
     }
 
     public resize = (width: number, height: number, pixelRatio: number) => {
@@ -350,7 +359,6 @@ class ClarityController {
         this.physicsRenderTargetA.setSize(physicsWidth, physicsHeight);
         this.physicsRenderTargetB.setSize(physicsWidth, physicsHeight);
         this.sceneRenderTarget.setSize(width, height);
-        this.downscaledSceneRenderTarget.setSize(downsampledWidth, downsampledHeight);
         this.blurRenderTargetA.setSize(downsampledWidth, downsampledHeight);
         this.blurRenderTargetB.setSize(downsampledWidth, downsampledHeight);
         
@@ -419,20 +427,42 @@ class ClarityController {
     }
     
     private _tryStartAnimation() {
-        if (this.hasSizedOnce && this.isMediaReady) {
+        if (this.hasSizedOnce && this.isMediaReady && !this.isPaused) {
             console.log("Clarity: All conditions met. Starting animation loop.");
             this.start();
         }
     }
 
     public start() { 
-        if (this.animationFrameId !== null) return;
+        if (this.animationFrameId !== null || this.isPaused) return;
+        this.lastInteractionTime = Date.now();
         this._animate(); 
+    }
+
+    public pause() {
+        if (this.isPaused || this.isCancelled) return;
+        console.log("Clarity: Pausing animation.");
+        this.isPaused = true;
+        if (this.animationFrameId !== null) {
+            if (this.isIdle) {
+                clearTimeout(this.animationFrameId);
+            } else {
+                cancelAnimationFrame(this.animationFrameId);
+            }
+            this.animationFrameId = null;
+        }
+    }
+
+    public resume() {
+        if (!this.isPaused || this.isCancelled) return;
+        console.log("Clarity: Resuming animation.");
+        this.isPaused = false;
+        this._tryStartAnimation();
     }
 
     public dispose() {
         this.isCancelled = true;
-        if (this.animationFrameId) cancelAnimationFrame(this.animationFrameId);
+        this.pause();
         
         this._cleanupPreviousMedia();
         this.planeGeometry.dispose();
@@ -443,7 +473,6 @@ class ClarityController {
         this.physicsRenderTargetA.dispose();
         this.physicsRenderTargetB.dispose();
         this.sceneRenderTarget.dispose();
-        this.downscaledSceneRenderTarget.dispose();
         this.blurRenderTargetA.dispose();
         this.blurRenderTargetB.dispose();
     
@@ -454,8 +483,23 @@ class ClarityController {
     // --- Private Methods ---
 
     private _animate = () => {
-        if (this.isCancelled) return;
-        this.animationFrameId = requestAnimationFrame(this._animate);
+        if (this.isCancelled || this.isPaused) return;
+        
+        const now = Date.now();
+        const timeSinceLastInteraction = now - this.lastInteractionTime;
+        const wasIdle = this.isIdle;
+
+        this.isIdle = !this.isMouseActive &&
+                      this.mediaState.type === 'image' &&
+                      timeSinceLastInteraction > ClarityController.IDLE_TIMEOUT;
+        
+        if (this.isIdle) {
+            if (!wasIdle) console.log("Clarity: Entering idle mode (10fps).");
+            this.animationFrameId = setTimeout(this._animate, ClarityController.IDLE_FRAME_INTERVAL) as any;
+        } else {
+            if (wasIdle) console.log("Clarity: Exiting idle mode.");
+            this.animationFrameId = requestAnimationFrame(this._animate);
+        }
 
         this._updateSmoothedValues();
         this._renderPhysicsPass();
@@ -502,13 +546,10 @@ class ClarityController {
         this.renderer.setRenderTarget(this.sceneRenderTarget);
         this.renderer.render(this.copyScene, this.camera);
         
-        // Render the source media again to a smaller texture for blurring (GPU-side downscaling)
-        this.renderer.setRenderTarget(this.downscaledSceneRenderTarget);
-        this.renderer.render(this.copyScene, this.camera);
-
-        // Horizontal blur pass on the downscaled texture
+        // Horizontal blur pass. We use the full-res scene texture as input and render
+        // to a downscaled render target. The GPU handles the downsampling implicitly.
         this.renderer.setRenderTarget(this.blurRenderTargetA);
-        this.blurMaterial.uniforms.uInput.value = this.downscaledSceneRenderTarget.texture;
+        this.blurMaterial.uniforms.uInput.value = this.sceneRenderTarget.texture;
         this.blurMaterial.uniforms.uDirection.value.set(1.0, 0.0);
         this.renderer.render(this.blurScene, this.camera);
 
@@ -639,6 +680,30 @@ const usePointerEvents = (
   }, [canvasRef, onPointerUpdate]);
 };
 
+// --- Visibility Hook ---
+const useVisibility = (
+  ref: RefObject<HTMLElement>,
+  onVisibilityChange: (isVisible: boolean) => void,
+  options: IntersectionObserverInit = { threshold: 0.01 }
+) => {
+  useEffect(() => {
+    const element = ref.current;
+    if (!element) return;
+
+    const observer = new IntersectionObserver(([entry]) => {
+      onVisibilityChange(entry.isIntersecting);
+    }, options);
+
+    observer.observe(element);
+
+    return () => {
+      if (element) {
+        observer.unobserve(element);
+      }
+    };
+  }, [ref, onVisibilityChange, options]);
+};
+
 // --- Main Framer Component ---
 export interface ClarityProps {
   mediaType: 'image' | 'video';
@@ -662,6 +727,7 @@ export interface ClarityProps {
  */
 export function Clarity(props: ClarityProps) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
+  const containerRef = useRef<HTMLDivElement>(null);
   const controllerRef = useRef<ClarityController | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [dimensions, setDimensions] = useState({ width: props.width, height: props.height });
@@ -723,8 +789,19 @@ export function Clarity(props: ClarityProps) {
 
   usePointerEvents(canvasRef, onPointerUpdate);
 
+  const handleVisibilityChange = useCallback((isVisible: boolean) => {
+    if (isVisible) {
+      controllerRef.current?.resume();
+    } else {
+      controllerRef.current?.pause();
+    }
+  }, []);
+  
+  useVisibility(containerRef, handleVisibilityChange);
+
   return (
     <div 
+      ref={containerRef}
       className="relative bg-black/20 inline-block overflow-hidden"
       style={{
           width: dimensions.width ? `${dimensions.width}px` : 'auto',
