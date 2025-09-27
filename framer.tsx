@@ -222,9 +222,12 @@ class ClarityController {
     private videoElement: HTMLVideoElement | null = null;
     private isCancelled = false;
     private animationFrameId: number | null = null;
-    private isReady = false;
     private loadMediaRequestId = 0;
     
+    // Initialization State
+    private hasSizedOnce = false;
+    private isMediaReady = false;
+
     // Animated properties for smooth transitions
     private targetProps = { refrostRate: 0.0030, brushSize: 0.30 };
     private animatedProps = { refrostRate: 0.0030, brushSize: 0.30 };
@@ -267,8 +270,6 @@ class ClarityController {
     }
     
     private _initMaterials() {
-        // FIX: The 'extensions.derivatives' property is deprecated in newer versions of THREE.js.
-        // Standard derivatives (dFdx, dFdy) are now enabled by default when used in shaders, so this property has been removed.
         this.mainMaterial = new THREE.ShaderMaterial({ 
             vertexShader: Shaders.vertexShader, 
             fragmentShader: Shaders.mainFragmentShader, 
@@ -326,14 +327,8 @@ class ClarityController {
 
     public resize = (width: number, height: number, pixelRatio: number) => {
         if (!width || !height || width <= 0 || height <= 0) {
-            if (this.isReady) console.log('Clarity: Canvas size is zero, pausing render.');
-            this.isReady = false;
             return;
         }
-
-        const wasNotReady = !this.isReady;
-        if (wasNotReady) console.log(`Clarity: Canvas resized to ${width}x${height}, starting render.`);
-        this.isReady = true;
 
         this.renderer.setPixelRatio(Math.min(window.devicePixelRatio, pixelRatio));
         this.renderer.setSize(width, height, false);
@@ -344,8 +339,6 @@ class ClarityController {
         const physicsWidth = Math.max(1, Math.round(width / ClarityController.PHYSICS_DOWNSAMPLE_FACTOR));
         const physicsHeight = Math.max(1, Math.round(height / ClarityController.PHYSICS_DOWNSAMPLE_FACTOR));
 
-        this._updateBrushUniforms();
-        
         this.mainMaterial.uniforms.uResolution.value.set(width, height);
         this.copyMaterial.uniforms.uResolution.value.set(width, height);
         this.physicsMaterial.uniforms.uResolution.value.set(physicsWidth, physicsHeight);
@@ -356,9 +349,13 @@ class ClarityController {
         this.sceneRenderTarget.setSize(width, height);
         this.blurRenderTargetA.setSize(downsampledWidth, downsampledHeight);
         this.blurRenderTargetB.setSize(downsampledWidth, downsampledHeight);
+        
+        this._updateBrushUniforms(width, height);
 
-        if (wasNotReady) {
-            this.start();
+        if (!this.hasSizedOnce) {
+            console.log(`Clarity: Canvas sized to ${width}x${height}.`);
+            this.hasSizedOnce = true;
+            this._tryStartAnimation();
         }
     }
     
@@ -368,7 +365,7 @@ class ClarityController {
         
         if (!src || (this.mediaState.type === type && this.mediaState.src === src)) return;
         
-        // Use an ID to track load requests, preventing race conditions if the media source changes quickly.
+        this.isMediaReady = false;
         this.loadMediaRequestId++;
         const currentRequestId = this.loadMediaRequestId;
         this.mediaState = { loading: true, type, src };
@@ -388,19 +385,22 @@ class ClarityController {
             
             if (this.isCancelled || currentRequestId !== this.loadMediaRequestId) {
                  result.texture.dispose();
-                 console.log("Clarity: Stale media load request ignored.");
                  return;
             }
 
+            console.log("Clarity: Media loaded successfully.");
             result.texture.colorSpace = THREE.SRGBColorSpace;
             this.copyMaterial.uniforms.uTexture.value = result.texture;
             this.copyMaterial.uniforms.uImageResolution.value.copy(result.resolution);
+            
+            this.isMediaReady = true;
+            this._tryStartAnimation();
 
         } catch (error) {
             if (this.isCancelled || currentRequestId !== this.loadMediaRequestId) {
-                console.log("Clarity: Stale media load request failed, ignoring error.");
                 return;
             }
+            this.isMediaReady = false;
             const errorMessage = (error instanceof Error) ? error.message : String(error);
             console.error(`Clarity Component Error: ${errorMessage}`);
             this.onError(errorMessage);
@@ -412,6 +412,13 @@ class ClarityController {
         }
     }
     
+    private _tryStartAnimation() {
+        if (this.hasSizedOnce && this.isMediaReady) {
+            console.log("Clarity: All conditions met. Starting animation loop.");
+            this.start();
+        }
+    }
+
     public start() { 
         if (this.animationFrameId !== null) return;
         this._animate(); 
@@ -442,7 +449,6 @@ class ClarityController {
     private _animate = () => {
         if (this.isCancelled) return;
         this.animationFrameId = requestAnimationFrame(this._animate);
-        if (!this.isReady) return;
 
         this._updateSmoothedValues();
         this._renderPhysicsPass();
@@ -462,7 +468,12 @@ class ClarityController {
         this.animatedProps.brushSize = THREE.MathUtils.lerp(this.animatedProps.brushSize, this.targetProps.brushSize, lerpFactor);
         
         this.physicsMaterial.uniforms.uRefrostRate.value = this.animatedProps.refrostRate;
-        this._updateBrushUniforms();
+        
+        const size = new THREE.Vector2();
+        this.renderer.getSize(size);
+        if (size.x > 0 && size.y > 0) {
+            this._updateBrushUniforms(size.x, size.y);
+        }
 
         this.smoothedMouse.lerp(this.mousePosition, 0.1);
     }
@@ -506,11 +517,8 @@ class ClarityController {
         this.renderer.render(this.mainScene, this.camera);
     }
 
-    private _updateBrushUniforms() {
-        if (!this.isReady) return;
-        const size = new THREE.Vector2();
-        this.renderer.getSize(size);
-        const brushPixelSize = Math.min(size.x, size.y) * this.animatedProps.brushSize;
+    private _updateBrushUniforms(width: number, height: number) {
+        const brushPixelSize = Math.min(width, height) * this.animatedProps.brushSize;
         this.mainMaterial.uniforms.uBrushSize.value = brushPixelSize;
         this.physicsMaterial.uniforms.uBrushSize.value = brushPixelSize / ClarityController.PHYSICS_DOWNSAMPLE_FACTOR;
     }
