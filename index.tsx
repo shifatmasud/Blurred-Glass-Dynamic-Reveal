@@ -1,6 +1,6 @@
+
 import React from 'react';
 import ReactDOM from 'react-dom/client';
-// Fix: Import the Clarity component directly.
 import { Clarity } from './framer.tsx';
 
 const rootElement = document.getElementById('root');
@@ -13,5 +13,4 @@ root.render(
   <React.StrictMode>
     <Clarity />
   </React.StrictMode>
-); 
- 
+);
