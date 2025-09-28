@@ -1,4 +1,5 @@
 
+
 import React, { useRef, useEffect, useCallback, useState, RefObject } from 'react';
 import * as THREE from 'three';
 //@ts-ignore
@@ -227,6 +228,12 @@ class ClarityController {
     private animationFrameId: number | null = null;
     private loadMediaRequestId = 0;
     
+    // Layout and Quality State
+    private layoutWidth = 0;
+    private layoutHeight = 0;
+    private pixelRatio = 1;
+    private downsampleFactor = 8;
+    
     // Initialization State
     private hasSizedOnce = false;
     private isMediaReady = false;
@@ -245,7 +252,6 @@ class ClarityController {
     private lastInteractionTime = Date.now();
 
     // Constants
-    private static DOWNSAMPLE_FACTOR = 8;
     private static PHYSICS_DOWNSAMPLE_FACTOR = 4;
     private static IDLE_TIMEOUT = 2000; // ms
     private static IDLE_FRAME_INTERVAL = 100; // ms, for ~10fps
@@ -271,7 +277,9 @@ class ClarityController {
         this.targetProps.refrostRate = initialProps.refrostRate;
         this.targetProps.brushSize = initialProps.brushSize;
         this.animatedProps = { ...this.targetProps };
-
+        
+        this.setFrostQuality(initialProps.frostQuality);
+        this._initQuality(initialProps.quality);
         this._initRendererAndCamera();
         this._initGeometry();
         this._initMaterials();
@@ -288,6 +296,7 @@ class ClarityController {
             powerPreference: 'low-power',
         });
         this.renderer.outputColorSpace = THREE.SRGBColorSpace;
+        this.renderer.setPixelRatio(this.pixelRatio);
         this.camera = new THREE.OrthographicCamera(-1, 1, 1, -1, 0, 1);
     }
 
@@ -345,8 +354,8 @@ class ClarityController {
         this.canvas.addEventListener('touchcancel', this._handleTouchEnd);
     }
     
-    public setProps(props: ClarityProps) {
-        this.props = props;
+    public setProps(props: Omit<ClarityProps, 'quality' | 'frostQuality'>) {
+        this.props = { ...this.props, ...props };
         this.targetProps.refrostRate = props.refrostRate;
         this.targetProps.brushSize = props.brushSize;
         if (this.mainMaterial) {
@@ -365,51 +374,90 @@ class ClarityController {
         }
     }
 
-    public resize = (width: number, height: number, quality: ClarityProps['quality']) => {
+    private _initQuality(quality: ClarityProps['quality']) {
+        switch (quality) {
+            case 'auto':
+                this.pixelRatio = Math.min(window.devicePixelRatio, 2);
+                break;
+            case 'ultra':
+                this.pixelRatio = 2;
+                break;
+            case 'balanced':
+                this.pixelRatio = 1.5;
+                break;
+            case 'performance':
+                this.pixelRatio = 1;
+                break;
+        }
+    }
+
+    public setQuality(quality: ClarityProps['quality']) {
+        this._initQuality(quality);
+        this.renderer.setPixelRatio(this.pixelRatio);
+        if (this.layoutWidth > 0 && this.layoutHeight > 0) {
+            this.setLayoutSize(this.layoutWidth, this.layoutHeight);
+        }
+    }
+    
+    public setFrostQuality(quality: ClarityProps['frostQuality']) {
+        switch (quality) {
+            case 'quality':
+                this.downsampleFactor = 2;
+                break;
+            case 'balanced':
+                this.downsampleFactor = 4;
+                break;
+            case 'performance':
+            default:
+                this.downsampleFactor = 8;
+                break;
+        }
+        
+        if (this.layoutWidth > 0 && this.layoutHeight > 0) {
+            const rtWidth = this.layoutWidth * this.pixelRatio;
+            const rtHeight = this.layoutHeight * this.pixelRatio;
+            const downsampledWidth = Math.max(1, Math.round(rtWidth / this.downsampleFactor));
+            const downsampledHeight = Math.max(1, Math.round(rtHeight / this.downsampleFactor));
+            this.blurMaterial.uniforms.uResolution.value.set(downsampledWidth, downsampledHeight);
+            this.blurRenderTargetA.setSize(downsampledWidth, downsampledHeight);
+            this.blurRenderTargetB.setSize(downsampledWidth, downsampledHeight);
+        }
+    }
+    
+    public setLayoutSize = (width: number, height: number) => {
         if (!width || !height || width <= 0 || height <= 0) {
             return;
         }
 
-        let pixelRatio = 1;
-        switch (quality) {
-            case 'auto':
-                pixelRatio = Math.min(window.devicePixelRatio, 2);
-                break;
-            case 'ultra':
-                pixelRatio = 2;
-                break;
-            case 'balanced':
-                pixelRatio = 1.5;
-                break;
-            case 'performance':
-                pixelRatio = 1;
-                break;
-        }
+        this.layoutWidth = width;
+        this.layoutHeight = height;
 
-        this.renderer.setPixelRatio(pixelRatio);
         this.renderer.setSize(width, height, false);
         this.camera.updateProjectionMatrix();
 
-        const downsampledWidth = Math.max(1, Math.round(width / ClarityController.DOWNSAMPLE_FACTOR));
-        const downsampledHeight = Math.max(1, Math.round(height / ClarityController.DOWNSAMPLE_FACTOR));
-        const physicsWidth = Math.max(1, Math.round(width / ClarityController.PHYSICS_DOWNSAMPLE_FACTOR));
-        const physicsHeight = Math.max(1, Math.round(height / ClarityController.PHYSICS_DOWNSAMPLE_FACTOR));
+        const rtWidth = width * this.pixelRatio;
+        const rtHeight = height * this.pixelRatio;
 
-        this.mainMaterial.uniforms.uResolution.value.set(width, height);
-        this.copyMaterial.uniforms.uResolution.value.set(width, height);
+        const downsampledWidth = Math.max(1, Math.round(rtWidth / this.downsampleFactor));
+        const downsampledHeight = Math.max(1, Math.round(rtHeight / this.downsampleFactor));
+        const physicsWidth = Math.max(1, Math.round(rtWidth / ClarityController.PHYSICS_DOWNSAMPLE_FACTOR));
+        const physicsHeight = Math.max(1, Math.round(rtHeight / ClarityController.PHYSICS_DOWNSAMPLE_FACTOR));
+
+        this.mainMaterial.uniforms.uResolution.value.set(rtWidth, rtHeight);
+        this.copyMaterial.uniforms.uResolution.value.set(rtWidth, rtHeight);
         this.physicsMaterial.uniforms.uResolution.value.set(physicsWidth, physicsHeight);
         this.blurMaterial.uniforms.uResolution.value.set(downsampledWidth, downsampledHeight);
         
         this.physicsRenderTargetA.setSize(physicsWidth, physicsHeight);
         this.physicsRenderTargetB.setSize(physicsWidth, physicsHeight);
-        this.sceneRenderTarget.setSize(width, height);
+        this.sceneRenderTarget.setSize(rtWidth, rtHeight);
         this.blurRenderTargetA.setSize(downsampledWidth, downsampledHeight);
         this.blurRenderTargetB.setSize(downsampledWidth, downsampledHeight);
         
-        this._updateBrushUniforms(width, height);
+        this._updateBrushUniforms(rtWidth, rtHeight);
 
         if (!this.hasSizedOnce) {
-            console.log(`Clarity: Canvas sized to ${width}x${height}.`);
+            console.log(`Clarity: Canvas sized to ${width}x${height} (Render targets: ${rtWidth}x${rtHeight}).`);
             this.hasSizedOnce = true;
             this._tryStartAnimation();
         }
@@ -449,13 +497,11 @@ class ClarityController {
                  return;
             }
             
-            // For images, resize on the GPU if it's larger than the canvas to save memory.
             if (shouldResize) {
                 result = this._resizeTextureOnGPU(result.texture, result.resolution);
             }
             
             console.log(`Clarity: Media loaded (${result.resolution.x}x${result.resolution.y}).`);
-            result.texture.colorSpace = THREE.SRGBColorSpace;
             this.copyMaterial.uniforms.uTexture.value = result.texture;
             this.copyMaterial.uniforms.uImageResolution.value.copy(result.resolution);
             
@@ -543,32 +589,33 @@ class ClarityController {
         }
     }
     
-    // --- Private Methods ---
-
     private _resizeTextureOnGPU(sourceTexture: THREE.Texture, sourceResolution: THREE.Vector2): { texture: THREE.Texture, resolution: THREE.Vector2 } {
         const canvasSize = new THREE.Vector2();
         this.renderer.getSize(canvasSize);
 
-        if (!this.hasSizedOnce || canvasSize.x === 0 || (sourceResolution.x <= canvasSize.x && sourceResolution.y <= canvasSize.y)) {
+        if (!this.hasSizedOnce || canvasSize.x === 0) {
+            return { texture: sourceTexture, resolution: sourceResolution };
+        }
+        
+        const targetSize = canvasSize.multiplyScalar(this.pixelRatio);
+
+        if (sourceResolution.x <= targetSize.x && sourceResolution.y <= targetSize.y) {
             return { texture: sourceTexture, resolution: sourceResolution };
         }
 
-        // Calculate scale needed for the source to COVER the canvas, without upscaling.
-        const canvasAspect = canvasSize.x / canvasSize.y;
+        const canvasAspect = targetSize.x / targetSize.y;
         const sourceAspect = sourceResolution.x / sourceResolution.y;
 
         let scale: number;
         if (canvasAspect > sourceAspect) {
-            // Canvas is wider than the source image. Match the width to cover.
-            scale = canvasSize.x / sourceResolution.x;
+            scale = targetSize.x / sourceResolution.x;
         } else {
-            // Canvas is taller or same aspect as the source image. Match the height to cover.
-            scale = canvasSize.y / sourceResolution.y;
+            scale = targetSize.y / sourceResolution.y;
         }
         
-        scale = Math.min(scale, 1.0); // Never upscale the source image.
+        scale = Math.min(scale, 1.0);
 
-        if (scale >= 0.99) { // Add a small threshold to avoid unnecessary resizes
+        if (scale >= 0.99) {
             return { texture: sourceTexture, resolution: sourceResolution };
         }
 
@@ -583,7 +630,6 @@ class ClarityController {
             stencilBuffer: false,
         });
 
-        // Use a simple scene to render the full texture to the smaller render target
         const tempScene = new THREE.Scene();
         const tempMaterial = new THREE.ShaderMaterial({
             vertexShader: Shaders.vertexShader,
@@ -604,7 +650,7 @@ class ClarityController {
         this.renderer.render(tempScene, this.camera);
 
         this.renderer.setRenderTarget(oldRenderTarget);
-        sourceTexture.dispose(); // Free original texture from VRAM
+        sourceTexture.dispose();
         tempMaterial.dispose();
 
         console.log(`Clarity: Media resized from ${sourceResolution.x}x${sourceResolution.y} to ${newWidth}x${newHeight} for sharpness.`);
@@ -648,7 +694,9 @@ class ClarityController {
 
     private _updatePointerPosition = (clientX: number, clientY: number) => {
         const rect = this.canvas.getBoundingClientRect();
-        this.updatePointer(clientX - rect.left, rect.height - (clientY - rect.top), true);
+        const physicalX = (clientX - rect.left) * this.pixelRatio;
+        const physicalY = (rect.height - (clientY - rect.top)) * this.pixelRatio;
+        this.updatePointer(physicalX, physicalY, true);
     };
 
     private _handleMouseMove = (event: MouseEvent) => this._updatePointerPosition(event.clientX, event.clientY);
@@ -674,7 +722,9 @@ class ClarityController {
         const size = new THREE.Vector2();
         this.renderer.getSize(size);
         if (size.x > 0 && size.y > 0) {
-            this._updateBrushUniforms(size.x, size.y);
+            const physicalWidth = size.x * this.pixelRatio;
+            const physicalHeight = size.y * this.pixelRatio;
+            this._updateBrushUniforms(physicalWidth, physicalHeight);
         }
 
         this.smoothedMouse.lerp(this.mousePosition, 0.1);
@@ -689,22 +739,18 @@ class ClarityController {
         this.physicsMaterial.uniforms.uIsMouseActive.value = this.isMouseActive ? 1.0 : 0.0;
         
         this.renderer.render(this.physicsScene, this.camera);
-        [this.physicsRenderTargetA, this.physicsRenderTargetB] = [this.physicsRenderTargetB, this.physicsRenderTargetA]; // Swap buffers
+        [this.physicsRenderTargetA, this.physicsRenderTargetB] = [this.physicsRenderTargetB, this.physicsRenderTargetA];
     }
     
     private _renderSceneAndBlurPasses() {
-        // Render the full-res source media to a texture for the 'clear' layer
         this.renderer.setRenderTarget(this.sceneRenderTarget);
         this.renderer.render(this.copyScene, this.camera);
         
-        // Horizontal blur pass. We use the full-res scene texture as input and render
-        // to a downscaled render target. The GPU handles the downsampling implicitly.
         this.renderer.setRenderTarget(this.blurRenderTargetA);
         this.blurMaterial.uniforms.uInput.value = this.sceneRenderTarget.texture;
         this.blurMaterial.uniforms.uDirection.value.set(1.0, 0.0);
         this.renderer.render(this.blurScene, this.camera);
 
-        // Vertical blur pass
         this.renderer.setRenderTarget(this.blurRenderTargetB);
         this.blurMaterial.uniforms.uInput.value = this.blurRenderTargetA.texture;
         this.blurMaterial.uniforms.uDirection.value.set(0.0, 1.0);
@@ -720,8 +766,8 @@ class ClarityController {
         this.renderer.render(this.mainScene, this.camera);
     }
 
-    private _updateBrushUniforms(width: number, height: number) {
-        const brushPixelSize = Math.min(width, height) * this.animatedProps.brushSize;
+    private _updateBrushUniforms(physicalWidth: number, physicalHeight: number) {
+        const brushPixelSize = Math.min(physicalWidth, physicalHeight) * this.animatedProps.brushSize;
         this.mainMaterial.uniforms.uBrushSize.value = brushPixelSize;
         this.physicsMaterial.uniforms.uBrushSize.value = brushPixelSize / ClarityController.PHYSICS_DOWNSAMPLE_FACTOR;
     }
@@ -855,6 +901,7 @@ export interface ClarityProps {
   refrostRate: number;
   brushSize: number;
   quality: 'auto' | 'ultra' | 'balanced' | 'performance';
+  frostQuality: 'performance' | 'balanced' | 'quality';
   chromaticAberration: number;
   reflectivity: number;
   blurBrightness: number;
@@ -902,15 +949,26 @@ export function Clarity(props: ClarityProps) {
   // Observe container size and resize controller
   const onResize = useCallback((entry: ResizeObserverEntry) => {
       const { width, height } = entry.contentRect;
-      controllerRef.current?.resize(width, height, props.quality);
-  }, [props.quality]);
+      controllerRef.current?.setLayoutSize(width, height);
+  }, []);
 
   useResizeObserver(containerRef, onResize);
 
-  // Handle updates to controller props
+  // Handle updates to quality (sharpness)
   useEffect(() => {
-    controllerRef.current?.setProps(props);
-  }, [props]);
+      controllerRef.current?.setQuality(props.quality);
+  }, [props.quality]);
+  
+  // Handle updates to frost quality
+  useEffect(() => {
+      controllerRef.current?.setFrostQuality(props.frostQuality);
+  }, [props.frostQuality]);
+
+  // Handle updates to other controller props
+  useEffect(() => {
+    const { quality, frostQuality, ...otherProps } = props;
+    controllerRef.current?.setProps(otherProps);
+  }, [props.mediaType, props.imageUrl, props.videoUrl, props.refrostRate, props.brushSize, props.chromaticAberration, props.reflectivity, props.blurBrightness]);
 
   // Update controller's error state
   useEffect(() => {
@@ -956,7 +1014,8 @@ Clarity.defaultProps = {
     imageUrl: "https://images.unsplash.com/photo-1470770841072-f978cf4d019e?q=80&w=2070&auto=format&fit=crop",
     refrostRate: 0.0030,
     brushSize: 0.30,
-    quality: 'auto',
+    quality: 'ultra',
+    frostQuality: 'performance',
     chromaticAberration: 0.01,
     reflectivity: 0.2,
     blurBrightness: 1.2,
@@ -976,6 +1035,13 @@ addPropertyControls(Clarity, {
         title: "Quality",
         options: ['auto', 'ultra', 'balanced', 'performance'],
         optionTitles: ['Auto (Recommended)', 'Ultra', 'Balanced', 'Performance'],
-        defaultValue: 'auto',
+        defaultValue: 'ultra',
+    },
+    frostQuality: {
+        type: ControlType.Enum,
+        title: "Frost Quality",
+        options: ['performance', 'balanced', 'quality'],
+        optionTitles: ['Performance', 'Balanced', 'Quality'],
+        defaultValue: 'performance',
     },
 });
