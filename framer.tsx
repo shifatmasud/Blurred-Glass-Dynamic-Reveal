@@ -135,6 +135,7 @@ const Shaders = {
     uniform float uBrushSize;
     uniform float uChromaticAberration;
     uniform float uReflectivity;
+    uniform float uBlurBrightness;
     varying vec2 vUv;
 
     float rand(vec2 n) { 
@@ -169,16 +170,17 @@ const Shaders = {
 
       // 3. Mix blurred and clear scenes
       float revealFactor = smoothstep(0.0, 0.4, clearFactor);
-      vec3 finalColor = mix(blurredColor, sceneColor, revealFactor);
+      vec3 finalColor = mix(blurredColor * uBlurBrightness, sceneColor, revealFactor);
 
       // 4. Add dynamic reflections and highlights
+      float nonClearFactor = 1.0 - revealFactor;
       float shimmer = rand(vUv * 10.0 + distortion * 5.0);
-      float highlight = pow(waterFactor + dripFactor, 2.0) * (0.5 + shimmer * 0.5);
+      float highlight = pow(waterFactor + dripFactor, 2.0) * (0.5 + shimmer * 0.5) * nonClearFactor;
       finalColor += highlight * uReflectivity;
 
-      // Add pointer sheen
+      // Add pointer sheen, ensuring it fades out in clear areas
       float sheen = 1.0 - smoothstep(0.0, uBrushSize * 1.5, distance(gl_FragCoord.xy, uMouse));
-      finalColor += sheen * 0.05 * (waterFactor + dripFactor);
+      finalColor += sheen * 0.05 * (waterFactor + dripFactor) * nonClearFactor;
 
       // 5. Add noise to frosted areas
       float noise = (rand(vUv * 2.0) - 0.5) * 0.04;
@@ -233,9 +235,10 @@ class ClarityController {
     private targetProps = { refrostRate: 0.0030, brushSize: 0.30 };
     private animatedProps = { refrostRate: 0.0030, brushSize: 0.30 };
     
+    // Callbacks to React component
     private onError: (message: string | null) => void;
-    private onMediaSized: (width: number, height: number) => void;
-    
+    private onMediaLoaded: (resolution: THREE.Vector2 | null) => void;
+
     // Resource Management State
     private isPaused = false;
     private isIdle = false;
@@ -247,10 +250,22 @@ class ClarityController {
     private static IDLE_TIMEOUT = 2000; // ms
     private static IDLE_FRAME_INTERVAL = 100; // ms, for ~10fps
 
-    constructor(canvas: HTMLCanvasElement, onError: (message: string | null) => void, onMediaSized: (width: number, height: number) => void, initialProps: ClarityProps) {
-        this.canvas = canvas;
+    constructor(
+        container: HTMLDivElement,
+        onError: (message: string | null) => void,
+        onMediaLoaded: (resolution: THREE.Vector2 | null) => void,
+        initialProps: ClarityProps
+    ) {
+        this.canvas = document.createElement('canvas');
+        this.canvas.style.width = '100%';
+        this.canvas.style.height = '100%';
+        this.canvas.style.display = 'block';
+        this.canvas.style.transition = 'opacity 0.3s';
+        this.canvas.ariaLabel = 'Interactive frosted glass pane';
+        container.appendChild(this.canvas);
+
         this.onError = onError;
-        this.onMediaSized = onMediaSized;
+        this.onMediaLoaded = onMediaLoaded;
         this.props = initialProps;
         
         this.targetProps.refrostRate = initialProps.refrostRate;
@@ -262,6 +277,7 @@ class ClarityController {
         this._initMaterials();
         this._initScenes();
         this._initRenderTargets();
+        this._initPointerEvents();
     }
     
     private _initRendererAndCamera() {
@@ -271,6 +287,7 @@ class ClarityController {
             alpha: true,
             powerPreference: 'low-power',
         });
+        this.renderer.outputColorSpace = THREE.SRGBColorSpace;
         this.camera = new THREE.OrthographicCamera(-1, 1, 1, -1, 0, 1);
     }
 
@@ -291,6 +308,7 @@ class ClarityController {
                 uBrushSize: { value: 120.0 },
                 uChromaticAberration: { value: this.props.chromaticAberration },
                 uReflectivity: { value: this.props.reflectivity },
+                uBlurBrightness: { value: this.props.blurBrightness },
             },
         });
         
@@ -318,6 +336,14 @@ class ClarityController {
         this.blurRenderTargetA = new THREE.WebGLRenderTarget(1, 1, options);
         this.blurRenderTargetB = new THREE.WebGLRenderTarget(1, 1, options);
     }
+
+    private _initPointerEvents() {
+        this.canvas.addEventListener('mousemove', this._handleMouseMove);
+        this.canvas.addEventListener('mouseleave', this._handleMouseLeave);
+        this.canvas.addEventListener('touchmove', this._handleTouchMove, { passive: true });
+        this.canvas.addEventListener('touchend', this._handleTouchEnd);
+        this.canvas.addEventListener('touchcancel', this._handleTouchEnd);
+    }
     
     public setProps(props: ClarityProps) {
         this.props = props;
@@ -326,7 +352,9 @@ class ClarityController {
         if (this.mainMaterial) {
             this.mainMaterial.uniforms.uChromaticAberration.value = props.chromaticAberration;
             this.mainMaterial.uniforms.uReflectivity.value = props.reflectivity;
+            this.mainMaterial.uniforms.uBlurBrightness.value = props.blurBrightness;
         }
+        this.loadMedia(props.mediaType, props.imageUrl, props.videoUrl);
     }
     
     public updatePointer(x: number, y: number, isActive: boolean) {
@@ -382,15 +410,20 @@ class ClarityController {
         const currentRequestId = this.loadMediaRequestId;
         this.mediaState = { loading: true, type, src };
         this.onError(null);
+        this.onMediaLoaded(null);
         this._cleanupPreviousMedia();
 
         try {
             let result: { texture: THREE.Texture, resolution: THREE.Vector2 };
+            let shouldResize = false;
 
             if (type === 'image' && imageUrl) {
                 result = await this._loadImageTexture(imageUrl);
+                this.onMediaLoaded(result.resolution.clone());
+                shouldResize = true;
             } else if (type === 'video' && videoUrl) {
                 result = await this._loadVideoTexture(videoUrl);
+                this.onMediaLoaded(result.resolution.clone());
             } else {
                 throw new Error("No valid media source provided.");
             }
@@ -400,9 +433,12 @@ class ClarityController {
                  return;
             }
             
-            this.onMediaSized(result.resolution.x, result.resolution.y);
-
-            console.log("Clarity: Media loaded successfully.");
+            // For images, resize on the GPU if it's larger than the canvas to save memory.
+            if (shouldResize) {
+                result = this._resizeTextureOnGPU(result.texture, result.resolution);
+            }
+            
+            console.log(`Clarity: Media loaded (${result.resolution.x}x${result.resolution.y}).`);
             result.texture.colorSpace = THREE.SRGBColorSpace;
             this.copyMaterial.uniforms.uTexture.value = result.texture;
             this.copyMaterial.uniforms.uImageResolution.value.copy(result.resolution);
@@ -460,10 +496,17 @@ class ClarityController {
         this._tryStartAnimation();
     }
 
+    public setErrorState(hasError: boolean) {
+        if (this.canvas) {
+            this.canvas.style.opacity = hasError ? '0.2' : '1';
+        }
+    }
+
     public dispose() {
         this.isCancelled = true;
         this.pause();
         
+        this._removePointerEvents();
         this._cleanupPreviousMedia();
         this.planeGeometry.dispose();
         this.mainMaterial.dispose();
@@ -478,9 +521,83 @@ class ClarityController {
     
         this.renderer.forceContextLoss();
         this.renderer.dispose();
+
+        if (this.canvas.parentElement) {
+            this.canvas.parentElement.removeChild(this.canvas);
+        }
     }
     
     // --- Private Methods ---
+
+    private _resizeTextureOnGPU(sourceTexture: THREE.Texture, sourceResolution: THREE.Vector2): { texture: THREE.Texture, resolution: THREE.Vector2 } {
+        const canvasSize = new THREE.Vector2();
+        this.renderer.getSize(canvasSize);
+
+        if (!this.hasSizedOnce || canvasSize.x === 0 || (sourceResolution.x <= canvasSize.x && sourceResolution.y <= canvasSize.y)) {
+            return { texture: sourceTexture, resolution: sourceResolution };
+        }
+
+        // Calculate scale needed for the source to COVER the canvas, without upscaling.
+        const canvasAspect = canvasSize.x / canvasSize.y;
+        const sourceAspect = sourceResolution.x / sourceResolution.y;
+
+        let scale: number;
+        if (canvasAspect > sourceAspect) {
+            // Canvas is wider than the source image. Match the width to cover.
+            scale = canvasSize.x / sourceResolution.x;
+        } else {
+            // Canvas is taller or same aspect as the source image. Match the height to cover.
+            scale = canvasSize.y / sourceResolution.y;
+        }
+        
+        scale = Math.min(scale, 1.0); // Never upscale the source image.
+
+        if (scale >= 0.99) { // Add a small threshold to avoid unnecessary resizes
+            return { texture: sourceTexture, resolution: sourceResolution };
+        }
+
+        const newWidth = Math.max(1, Math.round(sourceResolution.x * scale));
+        const newHeight = Math.max(1, Math.round(sourceResolution.y * scale));
+
+        const resizeTarget = new THREE.WebGLRenderTarget(newWidth, newHeight, {
+            minFilter: THREE.LinearFilter,
+            magFilter: THREE.LinearFilter,
+            format: THREE.RGBAFormat,
+            type: THREE.UnsignedByteType,
+            stencilBuffer: false,
+        });
+
+        // Use a simple scene to render the full texture to the smaller render target
+        const tempScene = new THREE.Scene();
+        const tempMaterial = new THREE.ShaderMaterial({
+            vertexShader: Shaders.vertexShader,
+            fragmentShader: `
+                precision mediump float;
+                uniform sampler2D uTexture;
+                varying vec2 vUv;
+                void main() {
+                  gl_FragColor = texture2D(uTexture, vUv);
+                }
+            `,
+            uniforms: { uTexture: { value: sourceTexture } }
+        });
+        tempScene.add(new THREE.Mesh(this.planeGeometry, tempMaterial));
+
+        const oldRenderTarget = this.renderer.getRenderTarget();
+        this.renderer.setRenderTarget(resizeTarget);
+        this.renderer.render(tempScene, this.camera);
+
+        this.renderer.setRenderTarget(oldRenderTarget);
+        sourceTexture.dispose(); // Free original texture from VRAM
+        tempMaterial.dispose();
+
+        console.log(`Clarity: Media resized from ${sourceResolution.x}x${sourceResolution.y} to ${newWidth}x${newHeight} for sharpness.`);
+
+        return {
+            texture: resizeTarget.texture,
+            resolution: new THREE.Vector2(newWidth, newHeight)
+        };
+    }
 
     private _animate = () => {
         if (this.isCancelled || this.isPaused) return;
@@ -511,6 +628,24 @@ class ClarityController {
             this.renderer.setRenderTarget(null);
             this.renderer.clear();
         }
+    }
+
+    private _updatePointerPosition = (clientX: number, clientY: number) => {
+        const rect = this.canvas.getBoundingClientRect();
+        this.updatePointer(clientX - rect.left, rect.height - (clientY - rect.top), true);
+    };
+
+    private _handleMouseMove = (event: MouseEvent) => this._updatePointerPosition(event.clientX, event.clientY);
+    private _handleMouseLeave = () => this.updatePointer(0, 0, false);
+    private _handleTouchMove = (event: TouchEvent) => { if (event.touches.length > 0) this._updatePointerPosition(event.touches[0].clientX, event.touches[0].clientY); };
+    private _handleTouchEnd = () => this.updatePointer(0, 0, false);
+
+    private _removePointerEvents() {
+        this.canvas.removeEventListener('mousemove', this._handleMouseMove);
+        this.canvas.removeEventListener('mouseleave', this._handleMouseLeave);
+        this.canvas.removeEventListener('touchmove', this._handleTouchMove);
+        this.canvas.removeEventListener('touchend', this._handleTouchEnd);
+        this.canvas.removeEventListener('touchcancel', this._handleTouchEnd);
     }
     
     private _updateSmoothedValues() {
@@ -646,40 +781,6 @@ class ClarityController {
     }
 }
 
-// --- Pointer Events Hook ---
-const usePointerEvents = (
-  canvasRef: RefObject<HTMLCanvasElement>,
-  onPointerUpdate: (x: number, y: number, isActive: boolean) => void
-) => {
-  useEffect(() => {
-    const canvas = canvasRef.current;
-    if (!canvas) return;
-
-    const updatePointerPosition = (clientX: number, clientY: number) => {
-        const rect = canvas.getBoundingClientRect();
-        onPointerUpdate(clientX - rect.left, rect.height - (clientY - rect.top), true);
-    };
-
-    const handleMouseMove = (event: MouseEvent) => updatePointerPosition(event.clientX, event.clientY);
-    const handleMouseLeave = () => onPointerUpdate(0, 0, false);
-    const handleTouchMove = (event: TouchEvent) => { if (event.touches.length > 0) updatePointerPosition(event.touches[0].clientX, event.touches[0].clientY); };
-    const handleTouchEnd = () => onPointerUpdate(0, 0, false);
-    
-    canvas.addEventListener('mousemove', handleMouseMove);
-    canvas.addEventListener('mouseleave', handleMouseLeave);
-    canvas.addEventListener('touchmove', handleTouchMove, { passive: true });
-    canvas.addEventListener('touchend', handleTouchEnd);
-    canvas.addEventListener('touchcancel', handleTouchEnd);
-
-    return () => {
-      canvas.removeEventListener('mousemove', handleMouseMove);
-      canvas.removeEventListener('mouseleave', handleMouseLeave);
-      canvas.removeEventListener('touchmove', handleTouchMove);
-      canvas.removeEventListener('touchend', handleTouchEnd);
-    };
-  }, [canvasRef, onPointerUpdate]);
-};
-
 // --- Visibility Hook ---
 const useVisibility = (
   ref: RefObject<HTMLElement>,
@@ -704,90 +805,101 @@ const useVisibility = (
   }, [ref, onVisibilityChange, options]);
 };
 
+
+// --- Resize Observer Hook ---
+const useResizeObserver = (
+  ref: RefObject<HTMLElement>,
+  onResize: (entry: ResizeObserverEntry) => void
+) => {
+  useEffect(() => {
+    const element = ref.current;
+    if (!element) return;
+
+    const observer = new ResizeObserver(([entry]) => {
+      if (entry) {
+        onResize(entry);
+      }
+    });
+
+    observer.observe(element);
+
+    return () => {
+      if (element) {
+        observer.unobserve(element);
+      }
+    };
+  }, [ref, onResize]);
+};
+
 // --- Main Framer Component ---
 export interface ClarityProps {
   mediaType: 'image' | 'video';
   imageUrl?: string;
   videoUrl?: string;
-  mediaScale: number;
   refrostRate: number;
   brushSize: number;
   pixelRatio: number;
   chromaticAberration: number;
   reflectivity: number;
-  width?: number;
-  height?: number;
+  blurBrightness: number;
 }
 
 /**
- * @framerSupportedLayoutWidth any-prefer-fixed
- * @framerSupportedLayoutHeight any-prefer-fixed
- * @framerIntrinsicWidth 600
- * @framerIntrinsicHeight 400
+ * @framerSupportedLayoutWidth any
+ * @framerSupportedLayoutHeight any
  */
 export function Clarity(props: ClarityProps) {
-  const canvasRef = useRef<HTMLCanvasElement>(null);
   const containerRef = useRef<HTMLDivElement>(null);
   const controllerRef = useRef<ClarityController | null>(null);
   const [error, setError] = useState<string | null>(null);
-  const [dimensions, setDimensions] = useState({ width: props.width, height: props.height });
-  const [originalMediaDimensions, setOriginalMediaDimensions] = useState<{width?: number, height?: number}>({ width: undefined, height: undefined });
+  const [mediaAspectRatio, setMediaAspectRatio] = useState<number | null>(null);
 
   const handleError = useCallback((message: string | null) => {
     setError(message);
-  }, []);
-  
-  const handleMediaSized = useCallback((width: number, height: number) => {
-      setOriginalMediaDimensions({ width, height });
+    if (message) {
+        setMediaAspectRatio(null);
+    }
   }, []);
 
-  // Initialize controller
+  const handleMediaLoaded = useCallback((resolution: THREE.Vector2 | null) => {
+      if (resolution && resolution.y > 0) {
+          setMediaAspectRatio(resolution.x / resolution.y);
+      } else {
+          setMediaAspectRatio(null);
+      }
+  }, []);
+
+  // Initialize controller once on mount
   useEffect(() => {
-    const canvas = canvasRef.current;
-    if (!canvas) return;
+    const container = containerRef.current;
+    if (!container) return;
     
-    const controller = new ClarityController(canvas, handleError, handleMediaSized, props);
+    const controller = new ClarityController(container, handleError, handleMediaLoaded, props);
     controllerRef.current = controller;
     
     return () => {
       controller.dispose();
       controllerRef.current = null;
     };
-  }, [handleError, handleMediaSized]);
+  }, [handleError, handleMediaLoaded]);
   
-  // Calculate final dimensions when media or scale changes
-  useEffect(() => {
-    if (originalMediaDimensions.width && originalMediaDimensions.height) {
-        setDimensions({
-            width: originalMediaDimensions.width * props.mediaScale,
-            height: originalMediaDimensions.height * props.mediaScale,
-        });
-    }
-  }, [originalMediaDimensions, props.mediaScale]);
+  // Observe container size and resize controller
+  const onResize = useCallback((entry: ResizeObserverEntry) => {
+      const { width, height } = entry.contentRect;
+      controllerRef.current?.resize(width, height, props.pixelRatio);
+  }, [props.pixelRatio]);
 
-  // Resize controller when component dimensions or pixelRatio change
-  useEffect(() => {
-      const controller = controllerRef.current;
-      if (controller && dimensions.width && dimensions.height) {
-          controller.resize(dimensions.width, dimensions.height, props.pixelRatio);
-      }
-  }, [dimensions, props.pixelRatio]);
+  useResizeObserver(containerRef, onResize);
 
-  // Handle updates to controller props that don't affect size
+  // Handle updates to controller props
   useEffect(() => {
     controllerRef.current?.setProps(props);
-  }, [props.refrostRate, props.brushSize, props.chromaticAberration, props.reflectivity]);
+  }, [props]);
 
-  // Handle media changes
+  // Update controller's error state
   useEffect(() => {
-    controllerRef.current?.loadMedia(props.mediaType, props.imageUrl, props.videoUrl);
-  }, [props.mediaType, props.imageUrl, props.videoUrl]);
-
-  const onPointerUpdate = useCallback((x: number, y: number, isActive: boolean) => {
-    controllerRef.current?.updatePointer(x, y, isActive);
-  }, []);
-
-  usePointerEvents(canvasRef, onPointerUpdate);
+      controllerRef.current?.setErrorState(!!error);
+  }, [error]);
 
   const handleVisibilityChange = useCallback((isVisible: boolean) => {
     if (isVisible) {
@@ -800,32 +912,25 @@ export function Clarity(props: ClarityProps) {
   useVisibility(containerRef, handleVisibilityChange);
 
   return (
-    <div 
-      ref={containerRef}
-      className="relative bg-black/20 inline-block overflow-hidden"
-      style={{
-          width: dimensions.width ? `${dimensions.width}px` : 'auto',
-          height: dimensions.height ? `${dimensions.height}px` : 'auto',
-          transition: 'width 0.4s ease-out, height 0.4s ease-out',
-      }}
-    >
-      <canvas 
-        ref={canvasRef} 
-        className="w-full h-full" 
-        style={{ display: 'block', opacity: error ? 0.2 : 1, transition: 'opacity 0.3s' }} 
-        aria-label="Interactive frosted glass pane" 
-       />
-      {error && (
+    <div className="w-full h-full flex items-center justify-center">
         <div 
-          className="absolute inset-0 flex flex-col items-center justify-center bg-transparent text-white p-6 text-center"
-          role="alert"
+          ref={containerRef}
+          className="relative bg-black/20 block max-w-full max-h-full transition-[width,height,aspect-ratio] duration-500 ease-in-out"
+          style={mediaAspectRatio ? { aspectRatio: `${mediaAspectRatio}` } : { width: '100%', height: '100%'}}
         >
-          <div className="max-w-md p-4 rounded-lg bg-black/50 backdrop-blur-sm border border-red-500/50">
-            <h3 className="font-bold text-md mb-2 text-red-400">Component Error</h3>
-            <p className="text-sm text-gray-300">{error}</p>
-          </div>
+          {/* The canvas is now created and managed by the ClarityController */}
+          {error && (
+            <div 
+              className="absolute inset-0 flex flex-col items-center justify-center bg-transparent text-white p-6 text-center"
+              role="alert"
+            >
+              <div className="max-w-md p-4 rounded-lg bg-black/50 backdrop-blur-sm border border-red-500/50">
+                <h3 className="font-bold text-md mb-2 text-red-400">Component Error</h3>
+                <p className="text-sm text-gray-300">{error}</p>
+              </div>
+            </div>
+          )}
         </div>
-      )}
     </div>
   );
 };
@@ -833,22 +938,22 @@ export function Clarity(props: ClarityProps) {
 Clarity.defaultProps = {
     mediaType: 'image',
     imageUrl: "https://images.unsplash.com/photo-1470770841072-f978cf4d019e?q=80&w=2070&auto=format&fit=crop",
-    mediaScale: 1.0,
     refrostRate: 0.0030,
     brushSize: 0.30,
     pixelRatio: 1.0,
     chromaticAberration: 0.01,
     reflectivity: 0.2,
+    blurBrightness: 1.2,
 };
 
 addPropertyControls(Clarity, {
     mediaType: { type: ControlType.Enum, title: "Media", options: ['image', 'video'], defaultValue: 'image' },
     imageUrl: { type: ControlType.Image, title: "Image", hidden: (props: ClarityProps) => props.mediaType !== 'image' },
     videoUrl: { type: ControlType.File, title: "Video", allowedFileTypes: ['mp4', 'webm', 'mov'], hidden: (props: ClarityProps) => props.mediaType !== 'video' },
-    mediaScale: { type: ControlType.Number, title: "Media Scale", min: 0.1, max: 2, step: 0.01, defaultValue: 1.0, displayStepper: true },
     refrostRate: { type: ControlType.Number, title: "Refrost Rate", min: 0, max: 0.005, step: 0.0001, defaultValue: 0.0030, displayStepper: true },
     brushSize: { type: ControlType.Number, title: "Pointer Size", min: 0.05, max: 0.5, step: 0.01, defaultValue: 0.30, displayStepper: true },
     reflectivity: { type: ControlType.Number, title: "Reflectivity", min: 0, max: 1.0, step: 0.01, defaultValue: 0.2, displayStepper: true },
     chromaticAberration: { type: ControlType.Number, title: "Aberration", min: 0, max: 0.1, step: 0.001, defaultValue: 0.01, displayStepper: true },
+    blurBrightness: { type: ControlType.Number, title: "Frost Brightness", min: 0.5, max: 2, step: 0.01, defaultValue: 1.2, displayStepper: true },
     pixelRatio: { type: ControlType.Number, title: "Pixel Ratio", min: 0.5, max: 2, step: 0.1, defaultValue: 1.0, displayStepper: true },
 });
