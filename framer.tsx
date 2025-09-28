@@ -1,5 +1,3 @@
-
-
 import React, { useRef, useEffect, useCallback, useState, RefObject } from 'react';
 import * as THREE from 'three';
 //@ts-ignore
@@ -222,7 +220,7 @@ class ClarityController {
     private mousePosition = new THREE.Vector2(-1000, -1000);
     private smoothedMouse = new THREE.Vector2(-1000, -1000);
     private isMouseActive = false;
-    private mediaState = { type: '', src: '', loading: false };
+    private mediaState: { type: string, src: string, loading: boolean } = { type: '', src: '', loading: false };
     private videoElement: HTMLVideoElement | null = null;
     private isCancelled = false;
     private animationFrameId: number | null = null;
@@ -356,6 +354,12 @@ class ClarityController {
     
     public setProps(props: Omit<ClarityProps, 'quality' | 'frostQuality'>) {
         this.props = { ...this.props, ...props };
+
+        if (this.videoElement) {
+            this.videoElement.muted = !this.props.videoSound;
+            this.videoElement.volume = this.props.videoVolume;
+        }
+
         this.targetProps.refrostRate = props.refrostRate;
         this.targetProps.brushSize = props.brushSize;
         if (this.mainMaterial) {
@@ -363,7 +367,7 @@ class ClarityController {
             this.mainMaterial.uniforms.uReflectivity.value = props.reflectivity;
             this.mainMaterial.uniforms.uBlurBrightness.value = props.blurBrightness;
         }
-        this.loadMedia(props.mediaType, props.imageUrl, props.videoUrl);
+        this.loadMedia(props.mediaType, props.imageUrl, props.videoUrl, props.gifUrl);
     }
     
     public updatePointer(x: number, y: number, isActive: boolean) {
@@ -463,9 +467,9 @@ class ClarityController {
         }
     }
     
-    public async loadMedia(mediaType: 'image' | 'video', imageUrl?: string, videoUrl?: string) {
+    public async loadMedia(mediaType: 'image' | 'video' | 'gif', imageUrl?: string, videoUrl?: string, gifUrl?: string) {
         const type = mediaType;
-        const src = type === 'image' ? imageUrl : videoUrl;
+        const src = type === 'image' ? imageUrl : (type === 'video' ? videoUrl : gifUrl);
         
         if (!src || (this.mediaState.type === type && this.mediaState.src === src)) return;
         
@@ -488,6 +492,10 @@ class ClarityController {
             } else if (type === 'video' && videoUrl) {
                 result = await this._loadVideoTexture(videoUrl);
                 this.onMediaLoaded(result.resolution.clone());
+            } else if (type === 'gif' && gifUrl) {
+                result = await this._loadGifTexture(gifUrl);
+                this.onMediaLoaded(result.resolution.clone());
+                shouldResize = true;
             } else {
                 throw new Error("No valid media source provided.");
             }
@@ -654,15 +662,24 @@ class ClarityController {
         tempMaterial.dispose();
 
         console.log(`Clarity: Media resized from ${sourceResolution.x}x${sourceResolution.y} to ${newWidth}x${newHeight} for sharpness.`);
-
+        
+        const newTexture = resizeTarget.texture;
+        // The source texture (from TextureLoader) has its colorspace set correctly.
+        // The render target inherits the renderer's output color space, which is also correct.
+        // No manual re-labeling is needed here.
+        
         return {
-            texture: resizeTarget.texture,
+            texture: newTexture,
             resolution: new THREE.Vector2(newWidth, newHeight)
         };
     }
 
     private _animate = () => {
         if (this.isCancelled || this.isPaused) return;
+
+        if (this.mediaState.type === 'gif' && this.copyMaterial.uniforms.uTexture.value) {
+            this.copyMaterial.uniforms.uTexture.value.needsUpdate = true;
+        }
         
         const now = Date.now();
         const timeSinceLastInteraction = now - this.lastInteractionTime;
@@ -804,6 +821,28 @@ class ClarityController {
             resolution: new THREE.Vector2(image.width, image.height)
         };
     }
+
+    private async _loadGifTexture(gifUrl: string): Promise<{ texture: THREE.Texture, resolution: THREE.Vector2 }> {
+        const loader = new THREE.ImageLoader();
+        loader.setCrossOrigin("Anonymous");
+
+        const image = await loader.loadAsync(gifUrl).catch(() => {
+            throw new Error(`Failed to load GIF. Check CORS policy or URL: ${gifUrl}`);
+        });
+
+        if (this.isCancelled) {
+            throw new Error('Component unmounted during GIF load');
+        }
+        
+        const texture = new THREE.Texture(image);
+        texture.colorSpace = THREE.SRGBColorSpace;
+        texture.needsUpdate = true; // Initial upload
+        
+        return { 
+            texture, 
+            resolution: new THREE.Vector2(image.width, image.height)
+        };
+    }
     
     private _loadVideoTexture(videoUrl: string): Promise<{ texture: THREE.VideoTexture, resolution: THREE.Vector2 }> {
         return new Promise((resolve, reject) => {
@@ -835,7 +874,8 @@ class ClarityController {
             video.addEventListener('error', onError);
             video.crossOrigin = "Anonymous";
             video.src = videoUrl;
-            video.muted = true;
+            video.muted = !this.props.videoSound;
+            video.volume = this.props.videoVolume;
             video.loop = true;
             video.playsInline = true;
             video.load();
@@ -895,9 +935,12 @@ const useResizeObserver = (
 
 // --- Main Framer Component ---
 export interface ClarityProps {
-  mediaType: 'image' | 'video';
+  mediaType: 'image' | 'video' | 'gif';
   imageUrl?: string;
   videoUrl?: string;
+  gifUrl?: string;
+  videoSound: boolean;
+  videoVolume: number;
   refrostRate: number;
   brushSize: number;
   quality: 'auto' | 'ultra' | 'balanced' | 'performance';
@@ -968,7 +1011,7 @@ export function Clarity(props: ClarityProps) {
   useEffect(() => {
     const { quality, frostQuality, ...otherProps } = props;
     controllerRef.current?.setProps(otherProps);
-  }, [props.mediaType, props.imageUrl, props.videoUrl, props.refrostRate, props.brushSize, props.chromaticAberration, props.reflectivity, props.blurBrightness]);
+  }, [props.mediaType, props.imageUrl, props.videoUrl, props.gifUrl, props.refrostRate, props.brushSize, props.chromaticAberration, props.reflectivity, props.blurBrightness, props.videoSound, props.videoVolume]);
 
   // Update controller's error state
   useEffect(() => {
@@ -1012,6 +1055,8 @@ export function Clarity(props: ClarityProps) {
 Clarity.defaultProps = {
     mediaType: 'image',
     imageUrl: "https://images.unsplash.com/photo-1470770841072-f978cf4d019e?q=80&w=2070&auto=format&fit=crop",
+    videoSound: false,
+    videoVolume: 0.5,
     refrostRate: 0.0030,
     brushSize: 0.30,
     quality: 'ultra',
@@ -1022,9 +1067,12 @@ Clarity.defaultProps = {
 };
 
 addPropertyControls(Clarity, {
-    mediaType: { type: ControlType.Enum, title: "Media", options: ['image', 'video'], defaultValue: 'image' },
+    mediaType: { type: ControlType.Enum, title: "Media", options: ['image', 'video', 'gif'], defaultValue: 'image' },
     imageUrl: { type: ControlType.Image, title: "Image", hidden: (props: ClarityProps) => props.mediaType !== 'image' },
     videoUrl: { type: ControlType.File, title: "Video", allowedFileTypes: ['mp4', 'webm', 'mov'], hidden: (props: ClarityProps) => props.mediaType !== 'video' },
+    gifUrl: { type: ControlType.Image, title: "GIF", hidden: (props: ClarityProps) => props.mediaType !== 'gif' },
+    videoSound: { type: ControlType.Boolean, title: "Sound", defaultValue: false, hidden: (props: ClarityProps) => props.mediaType !== 'video' },
+    videoVolume: { type: ControlType.Number, title: "Volume", min: 0, max: 1, step: 0.05, defaultValue: 0.5, displayStepper: true, hidden: (props: ClarityProps) => props.mediaType !== 'video' || !props.videoSound },
     refrostRate: { type: ControlType.Number, title: "Refrost Rate", min: 0, max: 0.005, step: 0.0001, defaultValue: 0.0030, displayStepper: true },
     brushSize: { type: ControlType.Number, title: "Pointer Size", min: 0.05, max: 0.5, step: 0.01, defaultValue: 0.30, displayStepper: true },
     reflectivity: { type: ControlType.Number, title: "Reflectivity", min: 0, max: 1.0, step: 0.01, defaultValue: 0.2, displayStepper: true },
