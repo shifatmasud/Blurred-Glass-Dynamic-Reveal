@@ -216,7 +216,7 @@ class ClarityController {
     private blurRenderTargetB: THREE.WebGLRenderTarget;
 
     // State
-    private props: ClarityProps;
+    private props: Omit<ClarityProps, 'imageSource' | 'imageUrlLink' | 'videoSource' | 'videoUrlLink' | 'gifSource' | 'gifUrlLink'>;
     private mousePosition = new THREE.Vector2(-1000, -1000);
     private smoothedMouse = new THREE.Vector2(-1000, -1000);
     private isMouseActive = false;
@@ -352,7 +352,7 @@ class ClarityController {
         this.canvas.addEventListener('touchcancel', this._handleTouchEnd);
     }
     
-    public setProps(props: Omit<ClarityProps, 'quality' | 'frostQuality'>) {
+    public setProps(props: Omit<ClarityProps, 'quality' | 'frostQuality' | 'imageSource' | 'imageUrlLink' | 'videoSource' | 'videoUrlLink' | 'gifSource' | 'gifUrlLink'>) {
         this.props = { ...this.props, ...props };
 
         if (this.videoElement) {
@@ -936,9 +936,15 @@ const useResizeObserver = (
 // --- Main Framer Component ---
 export interface ClarityProps {
   mediaType: 'image' | 'video' | 'gif';
+  imageSource: 'upload' | 'link';
   imageUrl?: string;
+  imageUrlLink?: string;
+  videoSource: 'upload' | 'link';
   videoUrl?: string;
+  videoUrlLink?: string;
+  gifSource: 'upload' | 'link';
   gifUrl?: string;
+  gifUrlLink?: string;
   videoSound: boolean;
   videoVolume: number;
   refrostRate: number;
@@ -1009,9 +1015,40 @@ export function Clarity(props: ClarityProps) {
 
   // Handle updates to other controller props
   useEffect(() => {
-    const { quality, frostQuality, ...otherProps } = props;
-    controllerRef.current?.setProps(otherProps);
-  }, [props.mediaType, props.imageUrl, props.videoUrl, props.gifUrl, props.refrostRate, props.brushSize, props.chromaticAberration, props.reflectivity, props.blurBrightness, props.videoSound, props.videoVolume]);
+    const { 
+        quality, 
+        frostQuality, 
+        imageSource,
+        imageUrl,
+        imageUrlLink,
+        videoSource,
+        videoUrl,
+        videoUrlLink,
+        gifSource,
+        gifUrl,
+        gifUrlLink,
+        ...otherProps 
+    } = props;
+    
+    const finalImageUrl = imageSource === 'link' ? imageUrlLink : imageUrl;
+    const finalVideoUrl = videoSource === 'link' ? videoUrlLink : videoUrl;
+    const finalGifUrl = gifSource === 'link' ? gifUrlLink : gifUrl;
+
+    const propsForController = {
+        ...otherProps,
+        imageUrl: finalImageUrl,
+        videoUrl: finalVideoUrl,
+        gifUrl: finalGifUrl,
+    };
+    
+    controllerRef.current?.setProps(propsForController);
+}, [
+    props.mediaType, props.imageUrl, props.videoUrl, props.gifUrl, 
+    props.refrostRate, props.brushSize, props.chromaticAberration, 
+    props.reflectivity, props.blurBrightness, props.videoSound, 
+    props.videoVolume, props.imageSource, props.imageUrlLink,
+    props.videoSource, props.videoUrlLink, props.gifSource, props.gifUrlLink
+]);
 
   // Update controller's error state
   useEffect(() => {
@@ -1054,7 +1091,13 @@ export function Clarity(props: ClarityProps) {
 
 Clarity.defaultProps = {
     mediaType: 'image',
+    imageSource: 'upload',
     imageUrl: "https://images.unsplash.com/photo-1470770841072-f978cf4d019e?q=80&w=2070&auto=format&fit=crop",
+    imageUrlLink: '',
+    videoSource: 'upload',
+    videoUrlLink: '',
+    gifSource: 'upload',
+    gifUrlLink: '',
     videoSound: false,
     videoVolume: 0.5,
     refrostRate: 0.0030,
@@ -1068,9 +1111,19 @@ Clarity.defaultProps = {
 
 addPropertyControls(Clarity, {
     mediaType: { type: ControlType.Enum, title: "Media", options: ['image', 'video', 'gif'], defaultValue: 'image' },
-    imageUrl: { type: ControlType.Image, title: "Image", hidden: (props: ClarityProps) => props.mediaType !== 'image' },
-    videoUrl: { type: ControlType.File, title: "Video", allowedFileTypes: ['mp4', 'webm', 'mov'], hidden: (props: ClarityProps) => props.mediaType !== 'video' },
-    gifUrl: { type: ControlType.Image, title: "GIF", hidden: (props: ClarityProps) => props.mediaType !== 'gif' },
+    // Image Controls
+    imageSource: { type: ControlType.SegmentedEnum, title: "Image Source", options: ['upload', 'link'], optionTitles: ["Upload", "Link"], defaultValue: 'upload', hidden: (props: ClarityProps) => props.mediaType !== 'image' },
+    imageUrl: { type: ControlType.Image, title: "Image Upload", hidden: (props: ClarityProps) => props.mediaType !== 'image' || props.imageSource !== 'upload' },
+    imageUrlLink: { type: ControlType.String, title: "Image Link", placeholder: "https://...", hidden: (props: ClarityProps) => props.mediaType !== 'image' || props.imageSource !== 'link' },
+    // Video Controls
+    videoSource: { type: ControlType.SegmentedEnum, title: "Video Source", options: ['upload', 'link'], optionTitles: ["Upload", "Link"], defaultValue: 'upload', hidden: (props: ClarityProps) => props.mediaType !== 'video' },
+    videoUrl: { type: ControlType.File, title: "Video Upload", allowedFileTypes: ['mp4', 'webm', 'mov'], hidden: (props: ClarityProps) => props.mediaType !== 'video' || props.videoSource !== 'upload' },
+    videoUrlLink: { type: ControlType.String, title: "Video Link", placeholder: "https://...", hidden: (props: ClarityProps) => props.mediaType !== 'video' || props.videoSource !== 'link' },
+    // GIF Controls
+    gifSource: { type: ControlType.SegmentedEnum, title: "GIF Source", options: ['upload', 'link'], optionTitles: ["Upload", "Link"], defaultValue: 'upload', hidden: (props: ClarityProps) => props.mediaType !== 'gif' },
+    gifUrl: { type: ControlType.Image, title: "GIF Upload", hidden: (props: ClarityProps) => props.mediaType !== 'gif' || props.gifSource !== 'upload' },
+    gifUrlLink: { type: ControlType.String, title: "GIF Link", placeholder: "https://...", hidden: (props: ClarityProps) => props.mediaType !== 'gif' || props.gifSource !== 'link' },
+    
     videoSound: { type: ControlType.Boolean, title: "Sound", defaultValue: false, hidden: (props: ClarityProps) => props.mediaType !== 'video' },
     videoVolume: { type: ControlType.Number, title: "Volume", min: 0, max: 1, step: 0.05, defaultValue: 0.5, displayStepper: true, hidden: (props: ClarityProps) => props.mediaType !== 'video' || !props.videoSound },
     refrostRate: { type: ControlType.Number, title: "Refrost Rate", min: 0, max: 0.005, step: 0.0001, defaultValue: 0.0030, displayStepper: true },
