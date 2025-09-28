@@ -365,12 +365,28 @@ class ClarityController {
         }
     }
 
-    public resize = (width: number, height: number, pixelRatio: number) => {
+    public resize = (width: number, height: number, quality: ClarityProps['quality']) => {
         if (!width || !height || width <= 0 || height <= 0) {
             return;
         }
 
-        this.renderer.setPixelRatio(Math.min(window.devicePixelRatio, pixelRatio));
+        let pixelRatio = 1;
+        switch (quality) {
+            case 'auto':
+                pixelRatio = Math.min(window.devicePixelRatio, 2);
+                break;
+            case 'ultra':
+                pixelRatio = 2;
+                break;
+            case 'balanced':
+                pixelRatio = 1.5;
+                break;
+            case 'performance':
+                pixelRatio = 1;
+                break;
+        }
+
+        this.renderer.setPixelRatio(pixelRatio);
         this.renderer.setSize(width, height, false);
         this.camera.updateProjectionMatrix();
 
@@ -838,7 +854,7 @@ export interface ClarityProps {
   videoUrl?: string;
   refrostRate: number;
   brushSize: number;
-  pixelRatio: number;
+  quality: 'auto' | 'ultra' | 'balanced' | 'performance';
   chromaticAberration: number;
   reflectivity: number;
   blurBrightness: number;
@@ -886,8 +902,8 @@ export function Clarity(props: ClarityProps) {
   // Observe container size and resize controller
   const onResize = useCallback((entry: ResizeObserverEntry) => {
       const { width, height } = entry.contentRect;
-      controllerRef.current?.resize(width, height, props.pixelRatio);
-  }, [props.pixelRatio]);
+      controllerRef.current?.resize(width, height, props.quality);
+  }, [props.quality]);
 
   useResizeObserver(containerRef, onResize);
 
@@ -940,7 +956,7 @@ Clarity.defaultProps = {
     imageUrl: "https://images.unsplash.com/photo-1470770841072-f978cf4d019e?q=80&w=2070&auto=format&fit=crop",
     refrostRate: 0.0030,
     brushSize: 0.30,
-    pixelRatio: 1.0,
+    quality: 'auto',
     chromaticAberration: 0.01,
     reflectivity: 0.2,
     blurBrightness: 1.2,
@@ -955,5 +971,11 @@ addPropertyControls(Clarity, {
     reflectivity: { type: ControlType.Number, title: "Reflectivity", min: 0, max: 1.0, step: 0.01, defaultValue: 0.2, displayStepper: true },
     chromaticAberration: { type: ControlType.Number, title: "Aberration", min: 0, max: 0.1, step: 0.001, defaultValue: 0.01, displayStepper: true },
     blurBrightness: { type: ControlType.Number, title: "Frost Brightness", min: 0.5, max: 2, step: 0.01, defaultValue: 1.2, displayStepper: true },
-    pixelRatio: { type: ControlType.Number, title: "Pixel Ratio", min: 0.5, max: 2, step: 0.1, defaultValue: 1.0, displayStepper: true },
+    quality: {
+        type: ControlType.Enum,
+        title: "Quality",
+        options: ['auto', 'ultra', 'balanced', 'performance'],
+        optionTitles: ['Auto (Recommended)', 'Ultra', 'Balanced', 'Performance'],
+        defaultValue: 'auto',
+    },
 });
